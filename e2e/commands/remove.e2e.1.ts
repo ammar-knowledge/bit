@@ -5,6 +5,7 @@ import { Extensions } from '../../src/constants';
 
 import Helper from '../../src/e2e-helper/e2e-helper';
 import * as fixtures from '../../src/fixtures/fixtures';
+import NpmCiRegistry, { supportNpmCiRegistryTesting } from '../npm-ci-registry';
 
 chai.use(require('chai-fs'));
 
@@ -460,4 +461,30 @@ describe('bit remove command', function () {
       helper.command.expectStatusToNotHaveIssue(IssuesClasses.RemovedDependencies.name);
     });
   });
+  (supportNpmCiRegistryTesting ? describe : describe.skip)(
+    'soft remove then installing a previous version of the dependency',
+    () => {
+      let npmCiRegistry: NpmCiRegistry;
+      before(async () => {
+        helper = new Helper({ scopesOptions: { remoteScopeWithDot: true } });
+        helper.scopeHelper.setNewLocalAndRemoteScopes();
+        helper.fixtures.populateComponents(2);
+        npmCiRegistry = new NpmCiRegistry(helper);
+        npmCiRegistry.configureCiInPackageJsonHarmony();
+        await npmCiRegistry.init();
+        helper.command.tagAllComponents();
+        helper.command.export();
+
+        helper.command.softRemoveComponent('comp2');
+        helper.command.install(); // installs 0.0.1 of comp2
+      });
+      after(() => {
+        npmCiRegistry.destroy();
+      });
+      // @todo: this should work once we change bit-status to check for issues with all components, not only modified.
+      it.skip('bit status should show RemovedDependency issue', () => {
+        helper.command.expectStatusToHaveIssue(IssuesClasses.RemovedDependencies.name);
+      });
+    }
+  );
 });

@@ -3,7 +3,7 @@ import { ComponentIssue, ISSUE_FORMAT_SPACE } from './component-issue';
 export class RemovedDependencies extends ComponentIssue {
   description = 'removed dependencies';
   solution =
-    'either "bit install" another version of the dependency that was not removed or edit the code to remove references to the dependency.';
+    'edit the code to remove references to the dependency. alternatively, if on lane, bit-install the component to get it from main';
   data: string[]; // deps ids
   isTagBlocker = true;
   dataToString() {
