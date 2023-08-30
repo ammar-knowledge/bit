@@ -1,5 +1,6 @@
 import didYouMean from 'didyoumean';
 import yargs from 'yargs';
+import inquirer from 'inquirer';
 import { Command } from '@teambit/legacy/dist/cli/command';
 import { GroupsType } from '@teambit/legacy/dist/cli/command-groups';
 import { compact } from 'lodash';
@@ -17,7 +18,7 @@ export class CLIParser {
   constructor(private commands: Command[], private groups: GroupsType) {}
 
   async parse(args = process.argv.slice(2)) {
-    this.throwForNonExistsCommand(args[0]);
+    await this.throwForNonExistsCommand(args[0], args);
     logger.debug(`[+] CLI-INPUT: ${args.join(' ')}`);
     yargs(args);
     yargs.help(false);
@@ -158,8 +159,7 @@ export class CLIParser {
         group: GLOBAL_GROUP,
       });
   }
-
-  private throwForNonExistsCommand(commandName: string) {
+  private async throwForNonExistsCommand(commandName: string, args: string[]) {
     if (!commandName || commandName.startsWith('-')) {
       return;
     }
@@ -175,9 +175,23 @@ export class CLIParser {
         commandName,
         this.commands.filter((c) => !c.private).map((c) => getCommandId(c.name))
       );
-      const suggestion = suggestions && Array.isArray(suggestions) ? suggestions[0] : suggestions;
 
-      throw new CommandNotFound(commandName, suggestion as string);
+      // If suggestions are found, prompt the user
+      if (suggestions && suggestions.length) {
+        const { selectedCommand } = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'selectedCommand',
+            message: 'Did you mean one of these commands?',
+            choices: Array.isArray(suggestions) ? suggestions : [suggestions],
+          },
+        ]);
+
+        // Re-parse with the new command and the rest of the original arguments
+        await this.parse([selectedCommand, ...args.slice(1)]);
+      } else {
+        throw new CommandNotFound(commandName, undefined);
+      }
     }
   }
 
