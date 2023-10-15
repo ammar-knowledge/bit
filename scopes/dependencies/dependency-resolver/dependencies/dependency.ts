@@ -11,7 +11,6 @@ export interface SerializedDependency {
   lifecycle: string;
   source?: DependencySource;
   hidden?: boolean;
-  packageName?: string;
 }
 
 /**

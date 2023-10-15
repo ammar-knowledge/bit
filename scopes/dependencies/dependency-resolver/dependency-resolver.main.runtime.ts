@@ -338,7 +338,7 @@ export class DependencyResolverMain {
     /**
      * Dependency resolver  extension configuration.
      */
-    public config: DependencyResolverWorkspaceConfig,
+    readonly config: DependencyResolverWorkspaceConfig,
 
     /**
      * Registry for changes by other extensions.
@@ -396,10 +396,6 @@ export class DependencyResolverMain {
   supportsDedupingOnExistingRoot(): boolean {
     const packageManager = this.getPackageManager();
     return packageManager?.supportsDedupingOnExistingRoot?.() === true && !this.isolatedCapsules();
-  }
-
-  setConfig(config: DependencyResolverWorkspaceConfig) {
-    this.config = config;
   }
 
   hasRootComponents(): boolean {
@@ -664,8 +660,9 @@ export class DependencyResolverMain {
       return modulePath;
     }
     const pkgName = this.getPackageName(component);
-    const selfRootDir = getRelativeRootComponentDir(
-      !isInWorkspace ? component.id.toString() : component.id.toStringWithoutVersion()
+    const selfRootDir = getRelativeRootComponentDir(!isInWorkspace 
+      ? component.id.toString()
+      : component.id.toStringWithoutVersion()
     );
     // In case the component is it's own root we want to load it from it's own root folder
     if (fs.pathExistsSync(selfRootDir)) {
