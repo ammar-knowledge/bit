@@ -1,8 +1,8 @@
 import { NoIdMatchPattern } from '@teambit/scope';
 import { expect } from 'chai';
 
-import NoIdMatchWildcard from '../../src/api/consumer/lib/exceptions/no-id-match-wildcard';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { NoIdMatchWildcard } from '@teambit/lister';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 describe('component id with wildcard', function () {
   this.timeout(0);
@@ -22,7 +22,7 @@ describe('component id with wildcard', function () {
       helper.fs.createFile('utils/fs/read', 'read.js');
       helper.fs.createFile('utils/fs/write', 'write.js');
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.command.addComponent('utils/is/*', { n: 'utils/is' });
       helper.command.addComponent('utils/fs/*', { n: 'utils/fs' });
       scopeAfterAdd = helper.scopeHelper.cloneLocalScope();
@@ -203,7 +203,7 @@ describe('component id with wildcard', function () {
           output = helper.command.reset('"*/is/*"');
         });
         it('should indicate the untagged components', () => {
-          expect(output).to.have.string('2 component(s) were untagged');
+          expect(output).to.have.string('2 component(s) were reset');
           expect(output).to.have.string('utils/is/string');
           expect(output).to.have.string('utils/is/type');
         });

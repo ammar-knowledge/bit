@@ -1,7 +1,7 @@
 import chai, { expect } from 'chai';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
-import OutdatedIndexJson from '../../src/scope/exceptions/outdated-index-json';
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { OutdatedIndexJson } from '@teambit/legacy.scope';
 
 chai.use(require('chai-fs'));
 
@@ -18,7 +18,7 @@ describe('scope components index mechanism', function () {
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
     });
     it('should save the component in the index.json file', () => {
@@ -91,7 +91,7 @@ describe('scope components index mechanism', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
 
       // as an intermediate step, make sure bit list shows one component
@@ -127,7 +127,7 @@ describe('scope components index mechanism', function () {
       before(() => {
         helper.scopeHelper.reInitLocalScope();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.command.tagAllWithoutBuild();
         const indexJsonWithBarFoo = helper.general.getComponentsFromIndexJson();
         helper.command.reset('bar/foo');
@@ -136,10 +136,7 @@ describe('scope components index mechanism', function () {
       });
       it('bit status should throw an error for the first time and then should work on the second run', () => {
         // used to show "Cannot read property 'scope' of null"
-        const error = new OutdatedIndexJson(
-          `component "${helper.scopes.remote}/bar/foo"`,
-          helper.general.indexJsonPath()
-        );
+        const error = new OutdatedIndexJson([`component "${helper.scopes.remote}/bar/foo"`]);
         const statusCmd = () => helper.command.status();
         helper.general.expectToThrow(statusCmd, error);
 

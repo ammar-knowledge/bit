@@ -1,12 +1,12 @@
 import Spinnies from 'dreidels';
-import loader from '@teambit/legacy/dist/cli/loader';
-import logger, { IBitLogger } from '@teambit/legacy/dist/logger/logger';
+import { loader } from '@teambit/legacy.loader';
+import { logger, IBitLogger } from '@teambit/legacy.logger';
 import chalk from 'chalk';
 import { platform } from 'os';
 import { ConsoleOnStart, LongProcessLogger } from './long-process-logger';
 
 export class Logger implements IBitLogger {
-  spinnies = new Spinnies();
+  private spinnies?: Spinnies;
   constructor(private extensionName: string) {}
 
   trace(message: string, ...meta: any[]) {
@@ -36,7 +36,8 @@ export class Logger implements IBitLogger {
     return loader.isSpinning;
   }
 
-  get multiSpinner() {
+  get multiSpinner(): Spinnies {
+    if (!this.spinnies) this.spinnies = new Spinnies();
     return this.spinnies;
   }
 

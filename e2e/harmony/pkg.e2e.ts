@@ -1,8 +1,7 @@
 import chai, { expect } from 'chai';
 import path from 'path';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
-import * as fixtures from '../../src/fixtures/fixtures';
+import { Helper, fixtures } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -26,7 +25,7 @@ describe('pkg extension', function () {
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.createComponentUtilsIsType();
       helper.fs.outputFile(path.join('utils', 'is-type.js'), fixtures.isType);
       helper.command.addComponent('utils', { i: 'utils/is-type' });
@@ -76,7 +75,7 @@ describe('pkg extension', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope({ addRemoteScopeAsDefaultScope: false });
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.createComponentUtilsIsType();
       helper.fs.outputFile(path.join('utils', 'is-type.js'), fixtures.isType);
       helper.command.addComponent('utils', { i: 'utils/is-type' });

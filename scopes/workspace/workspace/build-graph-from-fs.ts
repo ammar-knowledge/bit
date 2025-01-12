@@ -1,12 +1,12 @@
 import mapSeries from 'p-map-series';
 import { Graph, Node, Edge } from '@teambit/graph.cleargraph';
 import { flatten } from 'lodash';
-import { Consumer } from '@teambit/legacy/dist/consumer';
+import { Consumer } from '@teambit/legacy.consumer';
 import { Component, ComponentID } from '@teambit/component';
 import { DependencyResolverMain } from '@teambit/dependency-resolver';
 import { ComponentIdList } from '@teambit/component-id';
-import { Lane } from '@teambit/legacy/dist/scope/models';
-import { ComponentNotFound, ScopeNotFound } from '@teambit/legacy/dist/scope/exceptions';
+import { Lane } from '@teambit/scope.objects';
+import { ComponentNotFound, ScopeNotFound } from '@teambit/legacy.scope';
 import { ComponentNotFound as ComponentNotFoundInScope } from '@teambit/scope';
 import compact from 'lodash.compact';
 import { Logger } from '@teambit/logger';
@@ -21,7 +21,7 @@ export class GraphFromFsBuilder {
   private depth = 1;
   private consumer: Consumer;
   private importedIds: string[] = [];
-  private currentLane: Lane | null;
+  private currentLane: Lane | undefined;
   constructor(
     private workspace: Workspace,
     private logger: Logger,
@@ -122,7 +122,7 @@ export class GraphFromFsBuilder {
       throwForDependencyNotFound: this.shouldThrowOnMissingDep,
       throwForSeederNotFound: this.shouldThrowOnMissingDep,
       reFetchUnBuiltVersion: false,
-      lane: this.currentLane || undefined,
+      lane: this.currentLane,
       reason: 'for building a graph from the workspace',
     });
     allDepsNotImported.map((id) => this.importedIds.push(id.toString()));

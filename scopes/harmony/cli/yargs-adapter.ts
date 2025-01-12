@@ -1,8 +1,9 @@
-import { Command } from '@teambit/legacy/dist/cli/command';
+import { Command } from './command';
 import { Arguments, CommandModule, Argv, Options } from 'yargs';
-import { TOKEN_FLAG } from '@teambit/legacy/dist/constants';
+import { TOKEN_FLAG } from '@teambit/legacy.constants';
 import { camelCase } from 'lodash';
 import { CommandRunner } from './command-runner';
+import { OnCommandStartSlot } from './cli.main.runtime';
 
 export const GLOBAL_GROUP = 'Global';
 export const STANDARD_GROUP = 'Options';
@@ -11,7 +12,11 @@ export class YargsAdapter implements CommandModule {
   command: string;
   describe?: string;
   aliases?: string;
-  constructor(private commanderCommand: Command) {
+  commandRunner?: CommandRunner;
+  constructor(
+    private commanderCommand: Command,
+    private onCommandStartSlot: OnCommandStartSlot
+  ) {
     this.command = commanderCommand.name;
     this.describe = commanderCommand.description;
     this.aliases = commanderCommand.alias;
@@ -43,8 +48,8 @@ export class YargsAdapter implements CommandModule {
     }, {});
     this.commanderCommand._packageManagerArgs = (argv['--'] || []) as string[];
 
-    const commandRunner = new CommandRunner(this.commanderCommand, argsValues, flags);
-    return commandRunner.runCommand();
+    const commandRunner = new CommandRunner(this.commanderCommand, argsValues, flags, this.onCommandStartSlot);
+    this.commandRunner = commandRunner;
   }
 
   get positional() {
@@ -83,7 +88,7 @@ export class YargsAdapter implements CommandModule {
     };
     globalOptions['safe-mode'] = {
       describe:
-        'bootstrap the bare-minimum with only the CLI aspect. useful mainly for low-level commands when bit refuses to load',
+        'useful when it fails to load normally. it skips loading aspects from workspace.jsonc, and for legacy-commands it initializes only the CLI aspect',
       group: GLOBAL_GROUP,
     };
     return globalOptions;

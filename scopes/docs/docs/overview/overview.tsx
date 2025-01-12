@@ -1,3 +1,4 @@
+/* eslint-disable complexity */
 import React, { useContext, ComponentType, useState } from 'react';
 import classNames from 'classnames';
 import { flatten } from 'lodash';
@@ -10,6 +11,7 @@ import { ComponentPreview, ComponentPreviewProps } from '@teambit/preview.ui.com
 import { ComponentOverview } from '@teambit/component.ui.component-meta';
 import { CompositionGallery, CompositionGallerySkeleton } from '@teambit/compositions.panels.composition-gallery';
 import { useThemePicker } from '@teambit/base-react.themes.theme-switcher';
+import { useWorkspaceMode } from '@teambit/workspace.ui.use-workspace-mode';
 import { ReadmeSkeleton } from './readme-skeleton';
 import styles from './overview.module.scss';
 
@@ -43,7 +45,8 @@ export type OverviewProps = {
 export function Overview({ titleBadges, overviewOptions, previewProps, getEmptyState, TaggedAPI }: OverviewProps) {
   const component = useContext(ComponentContext);
   const componentDescriptor = useComponentDescriptor();
-  const { current } = useThemePicker();
+  const theme = useThemePicker();
+  const currentTheme = theme?.current;
   const overviewProps = flatten(overviewOptions.values())[0];
   const showHeader = !component.preview?.legacyHeader;
   const EmptyState = getEmptyState && getEmptyState();
@@ -53,7 +56,7 @@ export function Overview({ titleBadges, overviewOptions, previewProps, getEmptyS
   const defaultLoadingState = React.useMemo(() => {
     return isScaling && !includesEnvTemplate;
   }, [isScaling, includesEnvTemplate]);
-
+  const { isMinimal } = useWorkspaceMode();
   const [isLoading, setLoading] = useState(defaultLoadingState);
 
   const iframeQueryParams = `onlyOverview=${component.preview?.onlyOverview || 'false'}&skipIncludes=${
@@ -62,7 +65,7 @@ export function Overview({ titleBadges, overviewOptions, previewProps, getEmptyS
 
   const overviewPropsValues = overviewProps && overviewProps();
 
-  const themeParams = current?.themeName ? `theme=${current?.themeName}` : '';
+  const themeParams = currentTheme?.themeName ? `theme=${currentTheme?.themeName}` : '';
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { onLoad, style, ...rest } = previewProps || {};
@@ -81,7 +84,10 @@ export function Overview({ titleBadges, overviewOptions, previewProps, getEmptyS
   }, [component.id.toString(), defaultLoadingState]);
 
   return (
-    <div className={styles.overviewWrapper} key={`${component.id.toString()}`}>
+    <div
+      className={classNames(styles.overviewWrapper, isLoading && styles.noOverflow)}
+      key={`${component.id.toString()}`}
+    >
       {showHeader && (
         <ComponentOverview
           className={classNames(styles.componentOverviewBlock, !isScaling && styles.legacyPreview)}
@@ -102,19 +108,39 @@ export function Overview({ titleBadges, overviewOptions, previewProps, getEmptyS
               <CompositionGallerySkeleton compositionsLength={Math.min(component.compositions.length, 3)} />
             </ReadmeSkeleton>
           )}
-          <ComponentPreview
-            onLoad={onPreviewLoad}
-            previewName="overview"
-            pubsub={true}
-            queryParams={[iframeQueryParams, themeParams, overviewPropsValues?.queryParams || '']}
-            viewport={null}
-            fullContentHeight
-            disableScroll={true}
-            {...rest}
-            component={component}
-            style={{ width: '100%', height: '100%', minHeight: !isScaling ? 500 : undefined }}
-          />
-          {component.preview?.onlyOverview && !isLoading && <CompositionGallery component={component} />}
+          {!isMinimal ? (
+            <>
+              <ComponentPreview
+                onLoad={onPreviewLoad}
+                previewName="overview"
+                pubsub={true}
+                queryParams={[iframeQueryParams, themeParams, overviewPropsValues?.queryParams || '']}
+                viewport={null}
+                fullContentHeight
+                disableScroll={true}
+                {...rest}
+                component={component}
+                style={{ width: '100%', height: '100%', minHeight: !isScaling ? 500 : undefined }}
+              />
+              {component.preview?.onlyOverview && !isLoading && <CompositionGallery component={component} />}
+            </>
+          ) : (
+            <>
+              {component.preview?.onlyOverview && !isLoading && <CompositionGallery component={component} />}
+              <ComponentPreview
+                onLoad={onPreviewLoad}
+                previewName="overview"
+                pubsub={true}
+                queryParams={[iframeQueryParams, themeParams, overviewPropsValues?.queryParams || '']}
+                viewport={null}
+                fullContentHeight
+                disableScroll={true}
+                {...rest}
+                component={component}
+                style={{ width: '100%', height: '100%', minHeight: !isScaling ? 500 : undefined }}
+              />
+            </>
+          )}
           {component.preview?.onlyOverview && !isLoading && TaggedAPI && (
             <TaggedAPI componentId={component.id.toString()} />
           )}

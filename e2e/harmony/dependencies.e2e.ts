@@ -1,6 +1,6 @@
 import { IssuesClasses } from '@teambit/component-issues';
 import { expect } from 'chai';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 import NpmCiRegistry, { supportNpmCiRegistryTesting } from '../npm-ci-registry';
 
 describe('dependencies', function () {
@@ -97,8 +97,12 @@ describe('dependencies', function () {
       const ref = comp.flattenedEdgesRef;
       const content = helper.command.catObject(ref);
       const json = JSON.parse(content);
-
-      expect(json[0].source.scope).to.equal(helper.scopes.remote);
+      const firstEdge = json[0];
+      if (Array.isArray(firstEdge)) {
+        expect(firstEdge[0]).to.equal(`${helper.scopes.remote}/comp1@0.0.1`);
+      } else {
+        expect(json[0].source.scope).to.equal(helper.scopes.remote);
+      }
     });
   });
   describe('ignoring a dependency using // @bit-ignore', () => {

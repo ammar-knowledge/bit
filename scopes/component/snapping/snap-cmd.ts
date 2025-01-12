@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import { ComponentID } from '@teambit/component-id';
-import ConsumerComponent from '@teambit/legacy/dist/consumer/component/consumer-component';
+import { ConsumerComponent } from '@teambit/legacy.consumer-component';
 import { IssuesClasses } from '@teambit/component-issues';
 import { GlobalConfigMain } from '@teambit/global-config';
 import { Command, CommandOptions } from '@teambit/cli';
@@ -9,7 +9,7 @@ import {
   AUTO_SNAPPED_MSG,
   COMPONENT_PATTERN_HELP,
   CFG_FORCE_LOCAL_BUILD,
-} from '@teambit/legacy/dist/constants';
+} from '@teambit/legacy.constants';
 import { Logger } from '@teambit/logger';
 import { SnappingMain, SnapResults } from './snapping.main.runtime';
 import { outputIdsIfExists } from './tag-cmd';
@@ -65,10 +65,19 @@ to ignore multiple issues, separate them by a comma and wrap with quotes. to ign
       'fail-fast',
       'stop pipeline execution on the first failed task (by default a task is skipped only when its dependency failed)',
     ],
+    [
+      '',
+      'detach-head',
+      'UNSUPPORTED YET. in case a component is checked out to an older version, snap it without changing the head',
+    ],
   ] as CommandOptions;
   loader = true;
 
-  constructor(private snapping: SnappingMain, private logger: Logger, private globalConfig: GlobalConfigMain) {}
+  constructor(
+    private snapping: SnappingMain,
+    private logger: Logger,
+    private globalConfig: GlobalConfigMain
+  ) {}
 
   async report(
     [pattern]: string[],
@@ -86,6 +95,7 @@ to ignore multiple issues, separate them by a comma and wrap with quotes. to ign
       rebuildDepsGraph,
       unmodified = false,
       failFast = false,
+      detachHead,
     }: {
       unmerged?: boolean;
       editor?: string;
@@ -119,6 +129,7 @@ to ignore multiple issues, separate them by a comma and wrap with quotes. to ign
       rebuildDepsGraph,
       unmodified,
       exitOnFirstFailedTask: failFast,
+      detachHead,
     });
 
     if (!results) return chalk.yellow(NOTHING_TO_SNAP_MSG);
@@ -134,7 +145,7 @@ to ignore multiple issues, separate them by a comma and wrap with quotes. to ign
 
     const warningsOutput = warnings && warnings.length ? `${chalk.yellow(warnings.join('\n'))}\n\n` : '';
     const snapExplanation = `\n(use "bit export" to push these components to a remote")
-(use "bit reset" to unstage all local versions, or "bit reset --head" to only unstage the latest local snap)`;
+(use "bit reset --all" to unstage all local versions, or "bit reset --head" to only unstage the latest local snap)`;
 
     const compInBold = (id: ComponentID) => {
       const version = id.hasVersion() ? `@${id.version}` : '';

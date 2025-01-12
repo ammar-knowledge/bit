@@ -2,10 +2,9 @@ import chai, { expect } from 'chai';
 import detectIndent from 'detect-indent';
 import fs from 'fs-extra';
 import * as path from 'path';
-import { BIT_GIT_DIR, BIT_HIDDEN_DIR, BIT_MAP } from '../../src/constants';
-import { CURRENT_BITMAP_SCHEMA, SCHEMA_FIELD } from '../../src/consumer/bit-map/bit-map';
-import { InvalidBitMap } from '../../src/consumer/bit-map/exceptions';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { CURRENT_BITMAP_SCHEMA, SCHEMA_FIELD, InvalidBitMap } from '@teambit/legacy.bit-map';
+import { BIT_GIT_DIR, BIT_HIDDEN_DIR, BIT_MAP } from '@teambit/legacy.constants';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 const assertArrays = require('chai-arrays');
 
@@ -137,9 +136,9 @@ describe('run bit init', function () {
         helper.scopeHelper.reInitLocalScope();
         helper.workspaceJsonc.corrupt();
       });
-      it('bit status should throw an exception InvalidBitJson', () => {
+      it('bit status should throw a descriptive error', () => {
         const statusCmd = () => helper.command.runCmd('bit status');
-        expect(statusCmd).to.throw('failed to read config from path');
+        expect(statusCmd).to.throw('failed parsing the workspace.jsonc file at');
       });
     });
   });
@@ -151,7 +150,7 @@ describe('run bit init', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir(); // this modifies bitMap
+      helper.fixtures.addComponentBarFoo(); // this modifies bitMap
       helper.command.tagAllWithoutBuild(); // this creates objects in .bit dir
 
       bitMap = helper.bitMap.read();

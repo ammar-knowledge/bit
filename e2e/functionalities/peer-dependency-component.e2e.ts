@@ -1,7 +1,7 @@
 import path from 'path';
 import chai, { expect } from 'chai';
 import fs from 'fs-extra';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-string'));
 
@@ -98,6 +98,19 @@ describe('set-peer', function () {
           expect(bitMap.comp2.config['teambit.dependencies/dependency-resolver'].peer).to.eq(true);
           expect(bitMap.comp2.config['teambit.dependencies/dependency-resolver'].defaultPeerRange).to.eq('0');
         });
+      });
+    });
+    describe('unset-peer', () => {
+      before(() => {
+        helper.command.unsetPeer('comp2');
+        helper.command.snapAllComponents();
+        helper.command.build();
+      });
+      it('should remove the always peer fields from the scope data', () => {
+        const comp = helper.command.catComponent(`comp2@latest`);
+        const depResolver = comp.extensions.find(({ name }) => name === 'teambit.dependencies/dependency-resolver');
+        expect(depResolver.config.peer).to.eq(undefined);
+        expect(depResolver.config.defaultPeerRange).to.eq(undefined);
       });
     });
   });

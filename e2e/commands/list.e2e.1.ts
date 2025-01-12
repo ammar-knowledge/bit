@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 describe('bit list command', function () {
   this.timeout(0);
@@ -25,7 +25,7 @@ describe('bit list command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
     });
     it('should display "found 0 components"', () => {
       const output = helper.command.listLocalScope();
@@ -36,7 +36,7 @@ describe('bit list command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
     });
     it('should display "found 1 components"', () => {
@@ -50,7 +50,7 @@ describe('bit list command', function () {
       before(() => {
         helper.scopeHelper.setNewLocalAndRemoteScopes();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.fixtures.tagComponentBarFoo();
         helper.command.export();
         helper.scopeHelper.reInitLocalScope();

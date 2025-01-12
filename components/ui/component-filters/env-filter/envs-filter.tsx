@@ -5,7 +5,7 @@ import { ComponentUrl } from '@teambit/component.modules.component-url';
 import classNames from 'classnames';
 import { Ellipsis } from '@teambit/design.ui.styles.ellipsis';
 import { Tooltip } from '@teambit/design.ui.tooltip';
-import { Link } from '@teambit/base-react.navigation.link';
+import { Link as BaseLink } from '@teambit/base-react.navigation.link';
 import {
   ComponentFilterCriteria,
   ComponentFilterRenderProps,
@@ -15,6 +15,9 @@ import {
 } from '@teambit/component.ui.component-filters.component-filter-context';
 
 import styles from './envs-filter.module.scss';
+
+// @todo - this will be fixed as part of the @teambit/base-react.navigation.link upgrade to latest
+const Link = BaseLink as any;
 
 type EnvFilterEnvState = {
   active: boolean;
@@ -34,11 +37,14 @@ export const EnvsFilter: EnvsFilterCriteria = {
   id: 'envs',
   match: ({ component }, filter) => {
     const { envsState } = filter;
+    const areAllEnvsActive = [...envsState.values()].every((envState) => envState.active);
     const activeEnvs = [...envsState.values()].filter((envState) => envState.active).map((envState) => envState.id);
-    // match everything when no envs are set
-    if (activeEnvs.length === 0) return true;
+    // match everything when no envs are set or all envs are set
+    if (activeEnvs.length === 0 || areAllEnvsActive) return true;
+
     const envId =
       component.environment && ComponentID.tryFromString(component.environment.id)?.toStringWithoutVersion();
+
     const matches = !!envId && activeEnvs.indexOf(envId) >= 0;
     return matches;
   },
@@ -95,9 +101,10 @@ const deriveEnvsFilterState = (components: ComponentModel[]) => {
 function envsFilter({ components, className, lanes }: ComponentFilterRenderProps) {
   const [filters = []] = useComponentFilters() || [];
   const filtersExceptEnv = filters.filter((filter) => filter.id !== EnvsFilter.id);
+
   const filteredComponents = useMemo(
     () => runAllFilters(filtersExceptEnv, { components, lanes }),
-    [filtersExceptEnv, lanes?.viewedLane?.id.toString()]
+    [JSON.stringify(filtersExceptEnv), lanes?.viewedLane?.id.toString()]
   );
 
   const envsFilterState = deriveEnvsFilterState(filteredComponents);

@@ -7,9 +7,12 @@ import classnames from 'classnames';
 import { useUpdatedUrlFromQuery } from '@teambit/api-reference.hooks.use-api-ref-url';
 import { ComponentID } from '@teambit/component-id';
 import { ComponentUrl } from '@teambit/component.modules.component-url';
-import { Link } from '@teambit/base-react.navigation.link';
+import { Link as BaseLink } from '@teambit/base-react.navigation.link';
 
 import styles from './type-ref.renderer.module.scss';
+
+// @todo - this will be fixed as part of the @teambit/base-react.navigation.link upgrade to latest
+const Link = BaseLink as any;
 
 export const typeRefRenderer: APINodeRenderer = {
   predicate: (node) => node.__schema === TypeRefSchema.name,
@@ -43,14 +46,14 @@ function TypeRefComponent(props: APINodeRenderProps) {
       <>{children}</>
     );
 
-  const exportedTypeFromSameComp = typeRefNode.isFromThisComponent()
-    ? apiRefModel.apiByName.get(typeRefNode.name)
-    : undefined;
+  const exportedTypeFromSameComp = typeRefNode.isFromThisComponent() ? apiRefModel.getByName(typeRefNode) : undefined;
 
   const exportedTypeUrlFromSameComp =
     exportedTypeFromSameComp &&
     useUpdatedUrlFromQuery({
-      selectedAPI: exportedTypeFromSameComp.api.name,
+      selectedAPI: typeRefNode.isInternalReference()
+        ? apiRefModel.internalAPIKey(typeRefNode)
+        : exportedTypeFromSameComp.api.name,
     });
 
   const exportedTypeUrlFromAnotherComp = typeRefNode.componentId
@@ -70,9 +73,9 @@ function TypeRefComponent(props: APINodeRenderProps) {
         return (
           <React.Fragment key={`type-arg-renderer-container-${typeArg.__schema}-${typeArg.toString()}-${index}`}>
             <typeArgRenderer.Component
+              key={`type-arg-${typeArg.__schema}-${typeArg.toString()}-${index}`}
               {...props}
               className={styles.typeArgNode}
-              key={`type-arg-${typeArg.__schema}-${typeArg.toString()}-${index}`}
               apiNode={{ ...props.apiNode, api: typeArg, renderer: typeArgRenderer }}
               depth={(props.depth ?? 0) + 1}
               metadata={{ [typeArg.__schema]: { columnView: true } }}

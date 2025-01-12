@@ -11,11 +11,14 @@ import { VariableNodeSummary, EnumMemberSummary } from '@teambit/api-reference.r
 import { parameterRenderer as defaultParamRenderer } from '@teambit/api-reference.renderers.parameter';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import defaultTheme from '@teambit/api-reference.utils.custom-prism-syntax-highlighter-theme';
-import { Link } from '@teambit/base-react.navigation.link';
+import { Link as BaseLink } from '@teambit/base-react.navigation.link';
 import pluralize from 'pluralize';
 import classnames from 'classnames';
 
 import styles from './grouped-schema-nodes-overview-summary.module.scss';
+
+// @todo - this will be fixed as part of the @teambit/base-react.navigation.link upgrade to latest
+const Link = BaseLink as any;
 
 export type SchemaNodesSummaryProps = {
   name: string;
@@ -162,7 +165,7 @@ function SchemaMethodMember({
   const memberSignature =
     member.__schema === SetAccessorSchema.name
       ? `(${(member as SetAccessorSchema).param.toString()}) => void`
-      : transformSignature(member)?.split(member.name ?? '')[1] ?? member.signature;
+      : (transformSignature(member)?.split(member.name ?? '')[1] ?? member.signature);
 
   const { renderers } = apiNodeRendererProps;
   const { doc } = member;
@@ -211,8 +214,8 @@ function SchemaMethodMember({
                 if (paramRenderer?.Component) {
                   return (
                     <paramRenderer.Component
-                      {...apiNodeRendererProps}
                       key={`param-${param.name}`}
+                      {...apiNodeRendererProps}
                       depth={(apiNodeRendererProps.depth ?? 0) + 1}
                       apiNode={{ ...apiNodeRendererProps.apiNode, renderer: paramRenderer, api: param }}
                       metadata={{ [param.__schema]: { columnView: true, skipHeadings: true } }}
@@ -221,8 +224,8 @@ function SchemaMethodMember({
                 }
                 return (
                   <defaultParamRenderer.Component
-                    {...apiNodeRendererProps}
                     key={`param-${param.name}`}
+                    {...apiNodeRendererProps}
                     depth={(apiNodeRendererProps.depth ?? 0) + 1}
                     apiNode={{ ...apiNodeRendererProps.apiNode, renderer: defaultParamRenderer, api: param }}
                     metadata={{ [param.__schema]: { columnView: true, skipHeadings: true } }}

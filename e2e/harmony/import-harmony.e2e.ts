@@ -1,9 +1,7 @@
 import chai, { expect } from 'chai';
 import path from 'path';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import { DEFAULT_OWNER } from '../../src/e2e-helper/e2e-scopes';
+import { Helper, DEFAULT_OWNER } from '@teambit/legacy.e2e-helper';
 import NpmCiRegistry, { supportNpmCiRegistryTesting } from '../npm-ci-registry';
-import { UPDATE_DEPS_ON_IMPORT } from '../../src/api/consumer/lib/feature-toggle';
 
 chai.use(require('chai-fs'));
 
@@ -288,7 +286,7 @@ describe('import functionality on Harmony', function () {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fs.outputFile('bar/foo.ts', `import cors from 'cors'; console.log(cors);`);
       helper.command.add('bar');
-      helper.command.install('cors@2.8.5 @types/cors@2.8.10');
+      helper.command.install('cors@^2.8.5 @types/cors@^2.8.10');
 
       // intermediate step, make sure the types are saved in the
       const show = helper.command.showComponentParsed('bar');
@@ -345,7 +343,6 @@ describe('import functionality on Harmony', function () {
     };
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
-      helper.command.setFeatures(UPDATE_DEPS_ON_IMPORT);
       helper.fixtures.populateComponents(1);
       helper.fs.outputFile('comp1/foo.js', `const get = require('lodash.get'); console.log(get);`);
       helper.workspaceJsonc.addPolicyToDependencyResolver({
@@ -382,19 +379,26 @@ describe('import functionality on Harmony', function () {
     // create the following graph:
     // comp1 -> comp2 -> comp3 -> comp4
     // comp1 -> comp-a -> comp4
+    // comp1 -> comp-a2 -> comp3 -> comp4
     // comp1 -> comp-b
     before(() => {
       helper = new Helper();
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.populateComponents(4);
       helper.fs.outputFile('comp-a/index.js', `require('${helper.general.getPackageNameByCompName('comp4', false)}');`);
+      helper.fs.outputFile(
+        'comp-a2/index.js',
+        `require('${helper.general.getPackageNameByCompName('comp3', false)}');`
+      );
       helper.fs.outputFile('comp-b/index.js');
       helper.command.addComponent('comp-a');
       helper.command.addComponent('comp-b');
+      helper.command.addComponent('comp-a2');
       helper.command.compile();
       helper.fs.appendFile(
         'comp1/index.js',
-        `\nrequire('${helper.general.getPackageNameByCompName('comp-a', false)}');`
+        `\nrequire('${helper.general.getPackageNameByCompName('comp-a', false)}');
+        require('${helper.general.getPackageNameByCompName('comp-a2', false)}')`
       );
       helper.fs.appendFile(
         'comp1/index.js',
@@ -415,6 +419,7 @@ describe('import functionality on Harmony', function () {
       expect(bitMap).to.have.property('comp3');
       expect(bitMap).to.have.property('comp4');
       expect(bitMap).to.have.property('comp-a');
+      expect(bitMap).to.have.property('comp-a2');
       expect(bitMap).to.not.have.property('comp-b');
     });
     it('with --dependents-via should limit to graph traversing through the given id', () => {
@@ -429,6 +434,25 @@ describe('import functionality on Harmony', function () {
       expect(bitMap).to.have.property('comp4');
       expect(bitMap).to.not.have.property('comp-a');
       expect(bitMap).to.not.have.property('comp-b');
+    });
+  });
+  describe('import when component.json has a local env', () => {
+    let envId: string;
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      envId = helper.env.setCustomEnv();
+      helper.fixtures.populateComponents(1);
+      helper.command.setEnv('comp1', 'node-env');
+      helper.command.ejectConf('comp1');
+      helper.command.tagAllWithoutBuild();
+      helper.command.export();
+      helper.command.importComponent('comp1', '-x');
+    });
+    it('should not modified the component.json of the other component to add invalid env info', () => {
+      const fullEnvId = `${helper.scopes.remote}/${envId}`;
+      const componentJson = helper.componentJson.read('comp1');
+      expect(componentJson.extensions).to.have.property(fullEnvId);
+      expect(componentJson.extensions).to.not.have.property(`${fullEnvId}@0.0.1`);
     });
   });
 });

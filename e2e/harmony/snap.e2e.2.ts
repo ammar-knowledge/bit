@@ -1,11 +1,10 @@
 import chai, { expect } from 'chai';
 import fs from 'fs-extra';
 import path from 'path';
-import { HASH_SIZE, AUTO_SNAPPED_MSG, FILE_CHANGES_CHECKOUT_MSG } from '../../src/constants';
-import ComponentsPendingMerge from '../../src/consumer/component-ops/exceptions/components-pending-merge';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import * as fixtures from '../../src/fixtures/fixtures';
-import { MergeConflictOnRemote } from '../../src/scope/exceptions';
+import { HASH_SIZE, AUTO_SNAPPED_MSG, FILE_CHANGES_CHECKOUT_MSG } from '@teambit/legacy.constants';
+import { ComponentsPendingMerge } from '@teambit/legacy.consumer';
+import { Helper, fixtures } from '@teambit/legacy.e2e-helper';
+import { MergeConflictOnRemote } from '@teambit/legacy.scope';
 
 chai.use(require('chai-fs'));
 
@@ -23,7 +22,7 @@ describe('bit snap command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       output = helper.command.snapComponent('bar/foo');
     });
     it('should snap successfully', () => {
@@ -111,7 +110,7 @@ describe('bit snap command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.command.snapComponent('bar/foo', undefined, '--unmodified');
       const compAfterSnap1 = helper.command.catComponent('bar/foo');
       firstSnap = compAfterSnap1.head;
@@ -138,7 +137,7 @@ describe('bit snap command', function () {
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.command.snapComponent('bar/foo');
       firstSnap = helper.command.getHead('bar/foo');
       helper.command.export();
@@ -538,7 +537,7 @@ describe('bit snap command', function () {
       before(() => {
         helper.scopeHelper.reInitLocalScope();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.command.snapAllComponents();
         firstSnap = helper.command.getHead('bar/foo');
         helper.fixtures.createComponentBarFoo(fixtures.fooFixtureV2);

@@ -1,11 +1,11 @@
 import { Harmony } from '@teambit/harmony';
 import { Component } from '@teambit/component';
-import { UnmergedComponent } from '@teambit/legacy/dist/scope/lanes/unmerged-components';
+import { UnmergedComponent } from '@teambit/legacy.scope';
 import { ComponentID } from '@teambit/component-id';
 import { EnvsAspect } from '@teambit/envs';
 import { DependencyResolverAspect } from '@teambit/dependency-resolver';
-import { ExtensionDataList, getCompareExtPredicate } from '@teambit/legacy/dist/consumer/config/extension-data';
-import { partition, mergeWith, merge, uniq, uniqWith } from 'lodash';
+import { ExtensionDataList, getCompareExtPredicate } from '@teambit/legacy.extension-data';
+import { partition, mergeWith, merge, uniq, uniqWith, compact } from 'lodash';
 import { MergeConfigConflict } from './exceptions/merge-config-conflict';
 import { AspectSpecificField, ExtensionsOrigin, Workspace } from './workspace';
 import { MergeConflictFile } from './merge-conflict-file';
@@ -13,7 +13,10 @@ import { MergeConflictFile } from './merge-conflict-file';
 export class AspectsMerger {
   readonly mergeConflictFile: MergeConflictFile;
   private mergeConfigDepsResolverDataCache: { [compIdStr: string]: Record<string, any> } = {};
-  constructor(private workspace: Workspace, private harmony: Harmony) {
+  constructor(
+    private workspace: Workspace,
+    private harmony: Harmony
+  ) {
     this.mergeConflictFile = new MergeConflictFile(workspace.path);
   }
 
@@ -96,6 +99,8 @@ export class AspectsMerger {
     const [specific, nonSpecific] = partition(scopeExtensions, (entry) => entry.config[AspectSpecificField] === true);
     const scopeExtensionsNonSpecific = new ExtensionDataList(...nonSpecific);
     const scopeExtensionsSpecific = new ExtensionDataList(...specific);
+
+    this.addConfigDepsFromModelToConfigMerge(scopeExtensionsSpecific, mergeConfigCombined);
 
     const componentConfigFile = await this.workspace.componentConfigFile(componentId);
     if (componentConfigFile) {
@@ -243,6 +248,31 @@ export class AspectsMerger {
     }
   }
 
+  /**
+   * this is needed because if the mergeConfig has a policy, it will be used, and any other policy along the line will be ignored.
+   * in case the model has some dependencies that were set explicitly they're gonna be ignored.
+   * this makes sure to add them to the policy of the mergeConfig.
+   * in a way, this is similar to what we do when a user is running `bit deps set` and the component had previous dependencies set,
+   * we copy those dependencies along with the current one to the .bitmap file, so they won't get lost.
+   */
+  private addConfigDepsFromModelToConfigMerge(
+    scopeExtensionsSpecific: ExtensionDataList,
+    mergeConfig?: Record<string, any>
+  ) {
+    const mergeConfigPolicy = mergeConfig?.[DependencyResolverAspect.id]?.policy;
+    if (!mergeConfigPolicy) return;
+    const scopePolicy = scopeExtensionsSpecific.findCoreExtension(DependencyResolverAspect.id)?.config.policy;
+    if (!scopePolicy) return;
+    Object.keys(scopePolicy).forEach((key) => {
+      if (!mergeConfigPolicy[key]) {
+        mergeConfigPolicy[key] = scopePolicy[key];
+        return;
+      }
+      // mergeConfigPolicy should take precedence over scopePolicy
+      mergeConfigPolicy[key] = { ...scopePolicy[key], ...mergeConfigPolicy[key] };
+    });
+  }
+
   private getUnmergedData(componentId: ComponentID): UnmergedComponent | undefined {
     return this.workspace.scope.legacyScope.objects.unmergedComponents.getEntry(componentId);
   }
@@ -260,7 +290,7 @@ export class AspectsMerger {
       )
       .map((aspect) => aspect.stringId);
     if (envWasFoundPreviously && (envAspect || aspectsRegisteredAsEnvs.length)) {
-      const nonEnvs = extensionDataList.filter((e) => {
+      const nonEnvs = extensionDataList.map((e) => {
         // normally the env-id inside the envs aspect doesn't have a version, but the aspect itself has a version.
         // also, the env-id inside the envs aspect includes the default-scope, but the aspect itself doesn't.
         if (
@@ -268,13 +298,18 @@ export class AspectsMerger {
           (envFromEnvsAspect && e.extensionId?.toStringWithoutVersion() === envFromEnvsAspect) ||
           aspectsRegisteredAsEnvs.includes(e.stringId)
         ) {
-          return false;
+          return undefined;
         }
-        return true;
+        if (e.stringId === envAspect?.stringId) {
+          // must clone the env aspect to avoid mutating the original data
+          const clonedEnvAspect = e.clone();
+          delete clonedEnvAspect.config.env; // aspect env may have other data other then config.env.
+          return clonedEnvAspect;
+        }
+        return e;
       });
-      // still, aspect env may have other data other then config.env.
-      if (envAspect) delete envAspect.config.env;
-      return { extensionDataListFiltered: new ExtensionDataList(...nonEnvs), envIsCurrentlySet: true };
+
+      return { extensionDataListFiltered: new ExtensionDataList(...compact(nonEnvs)), envIsCurrentlySet: true };
     }
     if (envFromEnvsAspect && (origin === 'ModelNonSpecific' || origin === 'ModelSpecific')) {
       // if env was found, search for this env in the workspace and if found, replace the env-id with the one from the workspace
