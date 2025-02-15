@@ -1,8 +1,7 @@
 import chai, { expect } from 'chai';
 import path from 'path';
-import NpmCiRegistry, { supportNpmCiRegistryTesting } from '../npm-ci-registry';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import { generateRandomStr } from '../../src/utils';
+import { generateRandomStr } from '@teambit/toolbox.string.random';
+import { Helper, NpmCiRegistry, supportNpmCiRegistryTesting } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -194,7 +193,7 @@ const get = require("lodash.get");`
     });
     it("should install the package from the root manifest when the component doesn't have a policy for it", () => {
       const comp4Output = helper.command.showComponentParsed('comp4');
-      expect(comp4Output.packageDependencies['lodash.get']).to.equal('^4.4.2');
+      expect(comp4Output.packageDependencies['lodash.get']).to.equal('4.4.2');
     });
   });
 });

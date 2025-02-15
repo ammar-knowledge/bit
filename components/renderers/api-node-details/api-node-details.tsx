@@ -10,9 +10,8 @@ import { APIRefQueryParams } from '@teambit/api-reference.hooks.use-api-ref-url'
 import { useNavigate } from 'react-router-dom';
 import { APINode } from '@teambit/api-reference.models.api-reference-model';
 import { SchemaNodesIndex } from '@teambit/api-reference.renderers.schema-nodes-index';
-import { OnMount, Monaco } from '@monaco-editor/react';
-import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
 
+import { extractCodeBlock } from './extract-code-block';
 import styles from './api-node-details.module.scss';
 
 const INDEX_THRESHOLD_WIDTH = 600;
@@ -46,11 +45,11 @@ export function APINodeDetails({
   const navigate = useNavigate();
   const Editor = useCodeEditor();
 
-  const signatureEditorRef = useRef<monaco.editor.IStandaloneCodeEditor>();
-  const signatureMonacoRef = useRef<Monaco>();
+  const signatureEditorRef = useRef<any>();
+  const signatureMonacoRef = useRef<any>();
 
-  const exampleEditorRef = useRef<monaco.editor.IStandaloneCodeEditor>();
-  const exampleMonacoRef = useRef<Monaco>();
+  const exampleEditorRef = useRef<any>();
+  const exampleMonacoRef = useRef<any>();
 
   const routeToAPICmdId = useRef<string | null>(null);
   const apiUrlToRoute = useRef<string | null>(null);
@@ -79,8 +78,22 @@ export function APINodeDetails({
 
   const example = (doc?.tags || []).find((tag) => tag.tagName === 'example');
   const comment =
-    doc?.comment ??
-    doc?.tags?.filter((tag) => tag.comment).reduce((acc, tag) => acc.concat(`${tag.comment}\n` ?? ''), '');
+    doc?.comment ?? doc?.tags?.filter((tag) => tag.comment).reduce((acc, tag) => acc.concat(`${tag.comment}\n`), '');
+  const linkComment = doc?.tags?.find((tag) => tag.tagName === 'link')?.comment;
+
+  let linkPlaceholder: string | undefined;
+  let linkURL: string | undefined;
+
+  if (linkComment) {
+    const parts = linkComment.split(' ');
+    linkURL = parts.find((part) => part.startsWith('http'));
+    if (linkURL) {
+      linkPlaceholder = parts.filter((part) => part !== linkURL).join(' ');
+    } else {
+      linkPlaceholder = parts.join(' ');
+    }
+  }
+
   const signature = displaySignature || defaultSignature;
 
   const getAPINodeUrl = useCallback((queryParams: APIRefQueryParams) => {
@@ -138,11 +151,7 @@ export function APINodeDetails({
   };
 
   const updateEditorHeight =
-    (
-      editorRef: React.MutableRefObject<monaco.editor.IStandaloneCodeEditor | undefined>,
-      monacoRef: React.MutableRefObject<Monaco | undefined>
-    ) =>
-    () => {
+    (editorRef: React.MutableRefObject<any | undefined>, monacoRef: React.MutableRefObject<any | undefined>) => () => {
       if (!monacoRef.current) return undefined;
 
       const editor = editorRef.current;
@@ -186,13 +195,13 @@ export function APINodeDetails({
   // const updateEditorHeight = _.throttle<typeof _updateEditorHeight>(_updateEditorHeight, 300) as _.DebouncedFunc<any>;
 
   const handleEditorDidMount: (
-    monacoRef: React.MutableRefObject<Monaco | undefined>,
-    editorRef: React.MutableRefObject<monaco.editor.IStandaloneCodeEditor | undefined>,
+    monacoRef: React.MutableRefObject<any | undefined>,
+    editorRef: React.MutableRefObject<any | undefined>,
     containerRef: React.MutableRefObject<HTMLDivElement | null>,
     setHeight?: React.Dispatch<React.SetStateAction<string | undefined>>,
-    onMount?: (monaco: Monaco, editor: monaco.editor.IStandaloneCodeEditor) => void,
+    onMount?: (monaco: any, editor: any) => void,
     onUnMount?: () => void
-  ) => OnMount = React.useCallback(
+  ) => any = React.useCallback(
     (monacoRef, editorRef, containerRef, setHeight, onMount, unMount) => (editor, _monaco) => {
       /**
        * disable syntax check
@@ -212,7 +221,7 @@ export function APINodeDetails({
         esModuleInterop: true,
       });
 
-      monaco.editor.defineTheme('bit', {
+      monacoRef.current.editor.defineTheme('bit', {
         base: 'vs-dark',
         inherit: true,
         rules: [],
@@ -226,7 +235,7 @@ export function APINodeDetails({
         },
       });
 
-      monaco.editor.setTheme('bit');
+      monacoRef.current.editor.setTheme('bit');
 
       onMount?.(monacoRef.current, editorRef.current);
 
@@ -252,6 +261,14 @@ export function APINodeDetails({
     >
       <div className={styles.apiDetails} ref={apiRef}>
         {comment && <div className={styles.apiNodeDetailsComment}>{comment}</div>}
+        {linkComment && (
+          <div className={styles.apiNodeDetailsLink}>
+            {linkPlaceholder && <span>{linkPlaceholder}: </span>}
+            <a href={linkURL} target="_blank" rel="noopener noreferrer">
+              {linkURL}
+            </a>
+          </div>
+        )}
         {signature && (
           <div
             className={classnames(styles.apiNodeDetailsSignatureContainer, styles.codeEditorContainer)}
@@ -316,24 +333,4 @@ export function APINodeDetails({
       )}
     </div>
   );
-}
-
-/**
- * Extracts the code block and its language specifier enclosed between triple backticks (```) from a given text string.
- *
- * @param text - The text string from which to extract the code block.
- *
- * @returns An object containing the extracted code and language specifier, or null if no match is found.
- */
-function extractCodeBlock(text: string): { lang: string; code: string } | null {
-  // The (?<lang>[\w+-]*) captures the optional language specifier (like 'typescript', 'javascript', etc.)
-  // The (?<code>[\s\S]*?) captures the actual code block
-  const regex = /```(?<lang>[\w+-]*)\n(?<code>[\s\S]*?)```/;
-  const match = text.match(regex);
-
-  if (match && match.groups) {
-    const { lang, code } = match.groups;
-    return { lang, code };
-  }
-  return null;
 }

@@ -1,5 +1,5 @@
 import chai, { expect } from 'chai';
-import Helper from '../../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -52,7 +52,7 @@ describe('bit checkout command when on a lane', function () {
       helper.command.createLane();
       // helper.fixtures.populateComponents(2);
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.command.snapAllComponentsWithoutBuild('--unmodified');
       helper.command.export();
       helper.command.switchLocalLane('main', '-x');

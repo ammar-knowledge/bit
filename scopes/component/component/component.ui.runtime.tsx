@@ -13,7 +13,7 @@ import { UIRuntime } from '@teambit/ui';
 import { groupBy } from 'lodash';
 import { isBrowser } from '@teambit/ui-foundation.ui.is-browser';
 import { MenuItem, MenuItemSlot } from '@teambit/ui-foundation.ui.main-dropdown';
-import { NavigationSlot, RouteSlot } from '@teambit/ui-foundation.ui.react-router.slot-router';
+import type { NavigationSlot, RouteSlot } from '@teambit/ui-foundation.ui.react-router.slot-router';
 import { Import } from '@teambit/ui-foundation.ui.use-box.menu';
 import { snapToSemver } from '@teambit/component-package-version';
 import { AspectSection } from './aspect.section';
@@ -62,11 +62,14 @@ export class ComponentUI {
     private navSlot: OrderedNavigationSlot,
 
     readonly consumeMethodSlot: ConsumeMethodSlot,
-
     /**
      * slot for registering a new widget to the menu.
      */
     private widgetSlot: OrderedNavigationSlot,
+    /**
+     * slot for registering pinned widgets to the menu
+     */
+    private pinnedWidgetSlot: OrderedNavigationSlot,
     /**
      * slot for registering the right section of the menu
      */
@@ -236,6 +239,8 @@ export class ComponentUI {
         componentIdStr={options.componentId}
         useComponentFilters={options.useComponentFilters}
         RightNode={options.RightNode}
+        authToken={options.authToken}
+        pinnedWidgetSlot={this.pinnedWidgetSlot}
       />
     );
   }
@@ -263,6 +268,10 @@ export class ComponentUI {
 
   registerWidget(widget: LinkProps, order?: number) {
     this.widgetSlot.register({ props: widget, order });
+  }
+
+  registerPinnedWidget(widget: LinkProps, order?: number) {
+    this.pinnedWidgetSlot.register({ props: widget, order });
   }
 
   registerRightSideMenuItem(...rightSideMenuItem: RightSideMenuItem[]) {
@@ -302,6 +311,7 @@ export class ComponentUI {
     Slot.withType<ComponentPageSlot>(),
     Slot.withType<ComponentSearchResultSlot>(),
     Slot.withType<RightSideMenuSlot>(),
+    Slot.withType<NavPlugin>()
   ];
   static defaultConfig: ComponentUIConfig = {
     commandBar: true,
@@ -319,6 +329,7 @@ export class ComponentUI {
       pageSlot,
       componentSearchResultSlot,
       rightSideMenuSlot,
+      pinnedWidgetSlot,
     ]: [
       RouteSlot,
       OrderedNavigationSlot,
@@ -327,7 +338,8 @@ export class ComponentUI {
       MenuItemSlot,
       ComponentPageSlot,
       ComponentSearchResultSlot,
-      RightSideMenuSlot
+      RightSideMenuSlot,
+      OrderedNavigationSlot
     ]
   ) {
     // TODO: refactor ComponentHost to a separate extension (including sidebar, host, graphql, etc.)
@@ -338,6 +350,7 @@ export class ComponentUI {
       navSlot,
       consumeMethodSlot,
       widgetSlot,
+      pinnedWidgetSlot,
       rightSideMenuSlot,
       menuItemSlot,
       pageSlot,
@@ -358,6 +371,10 @@ export class ComponentUI {
     componentUI.registerRoute(aspectSection.route);
     componentUI.registerWidget(aspectSection.navigationLink, aspectSection.order);
     componentUI.registerConsumeMethod(componentUI.bitMethod);
+    componentUI.registerRightSideMenuItem({
+      item: <commandBarUI.CommandBarButton />,
+      order: 90,
+    });
     return componentUI;
   }
 }

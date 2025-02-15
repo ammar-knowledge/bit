@@ -1,9 +1,8 @@
 import chai, { expect } from 'chai';
-
-import { IMPORT_PENDING_MSG } from '../../src/constants';
-import { MissingBitMapComponent } from '../../src/consumer/bit-map/exceptions';
-import ComponentsPendingImport from '../../src/consumer/component-ops/exceptions/components-pending-import';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { MissingBitMapComponent } from '@teambit/legacy.bit-map';
+import { IMPORT_PENDING_MSG } from '@teambit/legacy.constants';
+import { ComponentsPendingImport } from '@teambit/legacy.consumer';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -21,7 +20,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       const bitMap = helper.bitMap.read();
       helper.fixtures.tagComponentBarFoo();
       helper.bitMap.write(bitMap);
@@ -73,7 +72,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       const bitMap = helper.bitMap.read();
       helper.command.export();
@@ -104,7 +103,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       helper.bitMap.delete();
       helper.command.init('--force');
@@ -162,7 +161,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       helper.command.export();
       helper.bitMap.delete();
@@ -172,7 +171,7 @@ describe('components that are not synced between the scope and the consumer', fu
     describe('bit add of the same component', () => {
       before(() => {
         helper.scopeHelper.getClonedLocalScope(scopeOutOfSync);
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
       });
       it('should sync the new component with the scope and assign a version and a scope name', () => {
         const bitMap = helper.bitMap.read();
@@ -186,7 +185,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       helper.command.export();
       helper.fs.deletePath('.bit');
@@ -195,7 +194,7 @@ describe('components that are not synced between the scope and the consumer', fu
     describe('bit tag', () => {
       it('should stop the tagging process and throw an error suggesting to import the components', () => {
         const err = new ComponentsPendingImport([`${helper.scopes.remote}/bar/foo@0.0.1`]);
-        helper.general.expectToThrow(() => helper.command.tagWithoutBuild('bar/foo'), err);
+        helper.general.expectToThrow(() => helper.command.tagWithoutBuild('bar/foo', '--unmodified'), err);
       });
     });
     describe('bit status', () => {
@@ -214,7 +213,7 @@ describe('components that are not synced between the scope and the consumer', fu
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       helper.command.tagIncludeUnmodified('2.0.0');
       const bitMap = helper.bitMap.read();
@@ -247,7 +246,7 @@ describe('components that are not synced between the scope and the consumer', fu
       before(() => {
         helper.scopeHelper.setNewLocalAndRemoteScopes();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.fixtures.tagComponentBarFoo();
         helper.command.export();
         scopeAfterV1 = helper.scopeHelper.cloneLocalScope();
@@ -282,7 +281,7 @@ describe('components that are not synced between the scope and the consumer', fu
       before(() => {
         helper.scopeHelper.setNewLocalAndRemoteScopes();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.fixtures.tagComponentBarFoo();
         helper.command.export();
         scopeAfterV1 = helper.scopeHelper.cloneLocalScope();

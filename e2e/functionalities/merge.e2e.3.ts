@@ -1,8 +1,7 @@
 import { expect } from 'chai';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
-import * as fixtures from '../../src/fixtures/fixtures';
-import { MergeConflict, MergeConflictOnRemote } from '../../src/scope/exceptions';
+import { Helper, fixtures } from '@teambit/legacy.e2e-helper';
+import { MergeConflict, MergeConflictOnRemote } from '@teambit/legacy.scope';
 
 describe('merge functionality', function () {
   this.timeout(0);
@@ -17,7 +16,7 @@ describe('merge functionality', function () {
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
 
       helper.fs.createFile('bar2', 'foo2.js');

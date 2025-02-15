@@ -1,18 +1,21 @@
 import 'reset-css';
 import pluralize from 'pluralize';
-import React, { useReducer, useMemo } from 'react';
+import React, { useReducer, useMemo, useEffect } from 'react';
 import { Route } from 'react-router-dom';
 import type { ComponentModel } from '@teambit/component';
 import type { ComponentID } from '@teambit/component-id';
 import { useNotifications } from '@teambit/ui-foundation.ui.notifications.notification-context';
-import { RouteSlot, SlotRouter } from '@teambit/ui-foundation.ui.react-router.slot-router';
+import { SlotRouter } from '@teambit/ui-foundation.ui.react-router.slot-router';
+import type { RouteSlot } from '@teambit/ui-foundation.ui.react-router.slot-router';
 import { Corner } from '@teambit/ui-foundation.ui.corner';
 import { Collapser } from '@teambit/ui-foundation.ui.buttons.collapser';
 import { SplitPane, Pane, Layout } from '@teambit/base-ui.surfaces.split-pane.split-pane';
 import { useThemePicker } from '@teambit/base-react.themes.theme-switcher';
 import { HoverSplitter } from '@teambit/base-ui.surfaces.split-pane.hover-splitter';
 import { TopBar } from '@teambit/ui-foundation.ui.top-bar';
+import { PreserveWorkspaceMode } from '@teambit/workspace.ui.preserve-workspace-mode';
 import classNames from 'classnames';
+import { useWorkspaceMode } from '@teambit/workspace.ui.use-workspace-mode';
 
 import { useWorkspace } from './use-workspace';
 import { WorkspaceOverview } from './workspace-overview';
@@ -32,13 +35,22 @@ export type WorkspaceProps = {
  * main workspace component.
  */
 export function Workspace({ routeSlot, menuSlot, sidebar, workspaceUI, onSidebarTogglerChange }: WorkspaceProps) {
+  const { isMinimal } = useWorkspaceMode();
   const reactions = useComponentNotifications();
   const { workspace } = useWorkspace(reactions);
-  const { current } = useThemePicker();
+  const theme = useThemePicker();
+  const currentTheme = theme?.current;
   const [isSidebarOpen, handleSidebarToggle] = useReducer((x) => !x, true);
   const sidebarOpenness = isSidebarOpen ? Layout.row : Layout.right;
-  const themeName = current?.themeName || 'light';
+  const themeName = currentTheme?.themeName || 'light';
   onSidebarTogglerChange(handleSidebarToggle);
+
+  useEffect(() => {
+    if (!window) return;
+    if (window.innerWidth <= 1024) {
+      handleSidebarToggle();
+    }
+  }, []);
 
   if (!workspace) {
     return <div className={styles.emptyContainer}></div>;
@@ -48,38 +60,41 @@ export function Workspace({ routeSlot, menuSlot, sidebar, workspaceUI, onSidebar
 
   return (
     <WorkspaceProvider workspace={workspace}>
-      <div className={styles.workspaceWrapper}>
-        <TopBar
-          className={classNames(styles.topbar, styles[themeName])}
-          Corner={() => (
-            <Corner
-              className={classNames(styles.corner, styles[themeName])}
-              name={workspace.name}
-              icon={workspace.icon}
+      <PreserveWorkspaceMode>
+        <div className={styles.workspaceWrapper}>
+          {
+            <TopBar
+              className={classNames(styles.topbar, styles[themeName])}
+              Corner={() => (
+                <Corner
+                  className={classNames((isMinimal && styles.minimalCorner) || styles.corner, styles[themeName])}
+                  name={workspace.name}
+                  icon={workspace.icon}
+                />
+              )}
+              menu={menuSlot}
             />
-          )}
-          menu={menuSlot}
-        />
-
-        <SplitPane className={styles.main} size={246} layout={sidebarOpenness}>
-          <Pane className={classNames(styles.sidebar, styles[themeName], !isSidebarOpen && styles.closed)}>
-            {sidebar}
-          </Pane>
-          <HoverSplitter className={styles.splitter}>
-            <Collapser
-              isOpen={isSidebarOpen}
-              onMouseDown={(e) => e.stopPropagation()} // avoid split-pane drag
-              onClick={handleSidebarToggle}
-              tooltipContent={`${isSidebarOpen ? 'Hide' : 'Show'} side panel`}
-            />
-          </HoverSplitter>
-          <Pane>
-            <SlotRouter slot={routeSlot}>
-              <Route index element={<WorkspaceOverview />} />
-            </SlotRouter>
-          </Pane>
-        </SplitPane>
-      </div>
+          }
+          <SplitPane className={styles.main} size={246} layout={sidebarOpenness}>
+            <Pane className={classNames(styles.sidebar, styles[themeName], !isSidebarOpen && styles.closed)}>
+              {sidebar}
+            </Pane>
+            <HoverSplitter className={styles.splitter}>
+              <Collapser
+                isOpen={isSidebarOpen}
+                onMouseDown={(e) => e.stopPropagation()} // avoid split-pane drag
+                onClick={handleSidebarToggle}
+                tooltipContent={`${isSidebarOpen ? 'Hide' : 'Show'} side panel`}
+              />
+            </HoverSplitter>
+            <Pane>
+              <SlotRouter slot={routeSlot}>
+                <Route index element={<WorkspaceOverview />} />
+              </SlotRouter>
+            </Pane>
+          </SplitPane>
+        </div>
+      </PreserveWorkspaceMode>
     </WorkspaceProvider>
   );
 }

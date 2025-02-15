@@ -1,6 +1,6 @@
 import chai, { expect } from 'chai';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import { VersionAlreadyExists } from '../../src/scope/exceptions';
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { VersionAlreadyExists } from '@teambit/legacy.scope';
 
 const assertArrays = require('chai-arrays');
 
@@ -23,7 +23,7 @@ describe('bit tag command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       const bitMap = helper.bitMap.read();
       bitMap['bar/foo'].mainFile = '';
       helper.bitMap.write(bitMap);
@@ -145,7 +145,7 @@ describe('bit tag command', function () {
       helper.scopeHelper.reInitLocalScope();
       const impl = 'hello\r\n world\r\n';
       helper.fixtures.createComponentBarFoo(impl);
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
     });
     it('should write the file to the model with Linux EOL characters', () => {

@@ -1,4 +1,4 @@
-import { BuildContext, BuiltTaskResult, BuildTask, CAPSULE_ARTIFACTS_DIR } from '@teambit/builder';
+import { BuildContext, BuiltTaskResult, BuildTask, CAPSULE_ARTIFACTS_DIR, ArtifactDefinition } from '@teambit/builder';
 import fs from 'fs-extra';
 import { join } from 'path';
 import { Compiler, CompilerAspect } from '@teambit/compiler';
@@ -14,9 +14,15 @@ import { testsResultsToJUnitFormat } from './utils/junit-generator';
 export class TesterTask implements BuildTask {
   readonly name = 'TestComponents';
   readonly dependencies = [CompilerAspect.id];
-  constructor(readonly aspectId: string, private devFiles: DevFilesMain) {}
+  constructor(
+    readonly aspectId: string,
+    private devFiles: DevFilesMain
+  ) {}
 
   async execute(context: BuildContext): Promise<BuiltTaskResult> {
+    if (!context.env.getTester) {
+      return { componentsResults: [] };
+    }
     const components = context.capsuleNetwork.originalSeedersCapsules.getAllComponents();
     const tester: Tester = context.env.getTester();
     const componentsSpecFiles = ComponentMap.as(components, (component) => {
@@ -105,12 +111,11 @@ export function getJUnitArtifactPath() {
   return join(CAPSULE_ARTIFACTS_DIR, '__bit_junit.xml');
 }
 
-export function getArtifactDef() {
+export function getArtifactDef(): ArtifactDefinition[] {
   return [
     {
       name: 'junit',
       globPatterns: [getJUnitArtifactPath()],
-      rootDir: CAPSULE_ARTIFACTS_DIR,
     },
   ];
 }

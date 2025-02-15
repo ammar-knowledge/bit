@@ -35,6 +35,11 @@ export type ComponentLintResult = {
   totalWarningCount: number;
 
   /**
+   * whether the component is clean (have no issues at all)
+   */
+  isClean: boolean;
+
+  /**
    * lint results for each one of the component files
    */
   results: LintResult[];
@@ -123,7 +128,7 @@ export type LintResults = {
   /**
    * total errors count of the component (from all of the components).
    */
-  totalErrorCount: number;
+  totalErrorCount?: number;
   /**
    * total fatal errors count of the component (from all of the components).
    */
@@ -139,13 +144,18 @@ export type LintResults = {
   /**
    * total warning count of the component (from all of the components).
    */
-  totalWarningCount: number;
+  totalWarningCount?: number;
 
-  totalComponentsWithErrorCount: number;
+  totalComponentsWithErrorCount?: number;
   totalComponentsWithFatalErrorCount?: number;
   totalComponentsWithFixableErrorCount?: number;
   totalComponentsWithFixableWarningCount?: number;
-  totalComponentsWithWarningCount: number;
+  totalComponentsWithWarningCount?: number;
+
+  /**
+   * whether all the linted components is clean (have no issues at all)
+   */
+  isClean?: boolean;
 
   errors: Error[];
 };

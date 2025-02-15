@@ -1,7 +1,7 @@
 import chai, { expect } from 'chai';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
-import { ComponentNotFound } from '../../src/scope/exceptions';
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { ComponentNotFound } from '@teambit/legacy.scope';
 
 chai.use(require('chai-fs'));
 
@@ -28,7 +28,7 @@ describe('harmony extension config', function () {
       before(() => {
         helper.scopeHelper.reInitLocalScope();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.extensions.addExtensionToVariant('*', 'teambit.scope/scope', config);
         helper.command.tagAllComponents();
         componentVersionModel = helper.command.catComponent('bar/foo@0.0.1');
@@ -56,7 +56,7 @@ describe('harmony extension config', function () {
         const EXTENSION_FOLDER = 'dummy-extension-without-logs';
         helper.scopeHelper.reInitLocalScope();
         helper.fixtures.createComponentBarFoo();
-        helper.fixtures.addComponentBarFooAsDir();
+        helper.fixtures.addComponentBarFoo();
         helper.workspaceJsonc.addDefaultScope();
         helper.workspaceJsonc.disablePreview();
         helper.fixtures.copyFixtureExtensions(EXTENSION_FOLDER);
@@ -239,7 +239,7 @@ describe('harmony extension config', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       const depResolverConfig = {
         policy: {
           dependencies: {

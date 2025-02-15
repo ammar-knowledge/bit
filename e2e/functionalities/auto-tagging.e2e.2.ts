@@ -1,6 +1,6 @@
 import chai, { expect } from 'chai';
-import { AUTO_TAGGED_MSG } from '../../src/api/consumer/lib/tag';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { AUTO_TAGGED_MSG } from '@teambit/snapping';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 

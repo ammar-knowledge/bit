@@ -12,11 +12,10 @@ export type {
   PackageManagerInstallOptions,
   PackageManagerResolveRemoteVersionOptions,
   ResolvedPackageVersion,
+  CalcDepsGraphOptions,
+  ComponentIdByPkgName,
 } from './package-manager';
-export type {
-  DependencyResolverWorkspaceConfig,
-  NodeLinker,
-} from './dependency-resolver-workspace-config';
+export type { DependencyResolverWorkspaceConfig, NodeLinker } from './dependency-resolver-workspace-config';
 export type {
   DependencyResolverMain,
   DependencyResolverVariantConfig,
@@ -50,6 +49,7 @@ export type {
   SerializedVariantPolicy,
   WorkspacePolicyConfigKeysNames,
   EnvPolicyConfigObject,
+  VariantPolicyConfigArr,
 } from './policy';
 export { DependencyLinker } from './dependency-linker';
 export type {

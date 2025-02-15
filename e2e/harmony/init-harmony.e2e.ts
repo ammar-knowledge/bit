@@ -1,6 +1,6 @@
 import chai, { expect } from 'chai';
 import path from 'path';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -62,6 +62,15 @@ describe('init command on Harmony', function () {
     // previously, it was throwing command-not-found
     it('should show a descriptive error', () => {
       expect(() => helper.command.install()).to.throw(`fatal: unable to load the workspace`);
+    });
+  });
+  describe('workspace.jsonc is missing', () => {
+    before(() => {
+      helper.scopeHelper.reInitLocalScope();
+      helper.fs.deletePath('workspace.jsonc');
+    });
+    it('bit init should fix it', () => {
+      expect(() => helper.command.init()).to.not.throw();
     });
   });
 });

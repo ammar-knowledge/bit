@@ -2,10 +2,10 @@ import { CLIAspect, CLIMain, MainRuntime } from '@teambit/cli';
 import { isBinaryFile } from 'isbinaryfile';
 import camelCase from 'camelcase';
 import { compact } from 'lodash';
-import replacePackageName from '@teambit/legacy/dist/utils/string/replace-package-name';
+import { replacePackageName } from '@teambit/legacy.utils';
 import { ComponentAspect, Component, ComponentID, ComponentMain } from '@teambit/component';
 import { BitError } from '@teambit/bit-error';
-import { AbstractVinyl } from '@teambit/legacy/dist/consumer/component/sources';
+import { AbstractVinyl } from '@teambit/component.sources';
 import { PkgAspect, PkgMain } from '@teambit/pkg';
 import { EnvsAspect, EnvsMain } from '@teambit/envs';
 import {
@@ -21,8 +21,6 @@ import {
   expressionStatementTransformer,
   typeReferenceTransformer,
 } from '@teambit/typescript';
-import { PrettierAspect, PrettierMain } from '@teambit/prettier';
-import { Formatter } from '@teambit/formatter';
 import { RefactoringAspect } from './refactoring.aspect';
 import { DependencyNameRefactorCmd, RefactorCmd } from './refactor.cmd';
 
@@ -32,8 +30,7 @@ export class RefactoringMain {
   constructor(
     private componentMain: ComponentMain,
     private pkg: PkgMain,
-    private envs: EnvsMain,
-    private prettierMain: PrettierMain
+    private envs: EnvsMain
   ) {}
 
   /**
@@ -199,7 +196,7 @@ export class RefactoringMain {
       const host = this.componentMain.getHost();
       const componentID = await host.resolveComponentId(id);
       return await this.getPackageNameByComponentID(componentID);
-    } catch (err) {
+    } catch {
       if (this.isValidScopedPackageName(id)) {
         return id; // assume this is a package-name
       }
@@ -257,20 +254,6 @@ export class RefactoringMain {
       })
     );
     return changed.some((c) => c);
-  }
-
-  private getDefaultFormatter(): Formatter {
-    return this.prettierMain.createFormatter(
-      { check: false },
-      {
-        config: {
-          parser: 'typescript',
-          trailingComma: 'es5',
-          tabWidth: 2,
-          singleQuote: true,
-        },
-      }
-    );
   }
 
   private async replaceMultipleStringsInOneComp(
@@ -332,16 +315,10 @@ export class RefactoringMain {
   }
 
   static slots = [];
-  static dependencies = [ComponentAspect, PkgAspect, CLIAspect, EnvsAspect, PrettierAspect];
+  static dependencies = [ComponentAspect, PkgAspect, CLIAspect, EnvsAspect];
   static runtime = MainRuntime;
-  static async provider([componentMain, pkg, cli, envMain, prettierMain]: [
-    ComponentMain,
-    PkgMain,
-    CLIMain,
-    EnvsMain,
-    PrettierMain
-  ]) {
-    const refactoringMain = new RefactoringMain(componentMain, pkg, envMain, prettierMain);
+  static async provider([componentMain, pkg, cli, envMain]: [ComponentMain, PkgMain, CLIMain, EnvsMain]) {
+    const refactoringMain = new RefactoringMain(componentMain, pkg, envMain);
     const subCommands = [new DependencyNameRefactorCmd(refactoringMain, componentMain)];
     const refactorCmd = new RefactorCmd();
     refactorCmd.commands = subCommands;

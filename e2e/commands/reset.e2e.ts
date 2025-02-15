@@ -1,6 +1,7 @@
 import { expect } from 'chai';
-import { MissingBitMapComponent } from '../../src/consumer/bit-map/exceptions';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { MissingBitMapComponent } from '@teambit/legacy.bit-map';
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { DETACH_HEAD } from '@teambit/harmony.modules.feature-toggle';
 
 describe('bit reset command', function () {
   this.timeout(0);
@@ -16,7 +17,7 @@ describe('bit reset command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       localScope = helper.scopeHelper.cloneLocalScope();
       const output = helper.command.listLocalScope();
@@ -118,7 +119,7 @@ describe('bit reset command', function () {
     before(() => {
       helper.scopeHelper.setNewLocalAndRemoteScopes();
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fs.createFile('bar2', 'foo2.js');
       helper.command.addComponent('bar2', { i: 'bar/foo2' });
       helper.fs.createFile('bar3', 'foo3.js');
@@ -135,7 +136,7 @@ describe('bit reset command', function () {
         untagOutput = helper.command.resetAll();
       });
       it('should display a descriptive successful message', () => {
-        expect(untagOutput).to.have.string('2 component(s) were untagged');
+        expect(untagOutput).to.have.string('2 component(s) were reset');
       });
       it('should remove only local components from the model', () => {
         const output = helper.command.listLocalScope();
@@ -151,7 +152,7 @@ describe('bit reset command', function () {
         untagOutput = helper.command.resetAll('--head');
       });
       it('should display a descriptive successful message', () => {
-        expect(untagOutput).to.have.string('3 component(s) were untagged');
+        expect(untagOutput).to.have.string('3 component(s) were reset');
       });
       it('should remove only the specified version from the model', () => {
         const output = helper.command.listLocalScope();
@@ -166,9 +167,9 @@ describe('bit reset command', function () {
     before(() => {
       helper.scopeHelper.reInitLocalScope();
       helper.fixtures.createComponentIsType();
-      helper.fixtures.addComponentUtilsIsTypeAsDir();
+      helper.fixtures.addComponentUtilsIsType();
       helper.fixtures.createComponentIsString();
-      helper.fixtures.addComponentUtilsIsStringAsDir();
+      helper.fixtures.addComponentUtilsIsString();
       helper.command.linkAndRewire();
       helper.command.tagAllWithoutBuild();
       localScope = helper.scopeHelper.cloneLocalScope();
@@ -195,7 +196,7 @@ describe('bit reset command', function () {
           untagOutput = helper.command.reset('utils/is-type', undefined, '--force');
         });
         it('should untag successfully', () => {
-          expect(untagOutput).to.have.string('1 component(s) were untagged');
+          expect(untagOutput).to.have.string('1 component(s) were reset');
         });
       });
       describe('after exporting the component and tagging the scope', () => {
@@ -236,7 +237,7 @@ describe('bit reset command', function () {
         untagOutput = helper.command.reset('utils/is-string');
       });
       it('should untag successfully the dependent', () => {
-        expect(untagOutput).to.have.string('1 component(s) were untagged');
+        expect(untagOutput).to.have.string('1 component(s) were reset');
         expect(untagOutput).to.have.string('utils/is-string');
       });
       it('should leave the dependency intact', () => {
@@ -263,7 +264,7 @@ describe('bit reset command', function () {
           output = helper.command.reset('utils/is-string');
         });
         it('should untag successfully', () => {
-          expect(output).to.have.string('1 component(s) were untagged');
+          expect(output).to.have.string('1 component(s) were reset');
           expect(output).to.have.string('utils/is-string');
         });
       });
@@ -303,6 +304,68 @@ describe('bit reset command', function () {
       helper.command.export();
       const stagedConfig = helper.general.getStagedConfig();
       expect(stagedConfig).to.have.lengthOf(0);
+    });
+  });
+  describe('when checked out to a non-head version with detach-head functionality', () => {
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.command.setFeatures(DETACH_HEAD);
+      helper.fixtures.populateComponents(1, false);
+      helper.command.tagWithoutBuild();
+      helper.fixtures.populateComponents(1, false, 'version2');
+      helper.command.tagWithoutBuild();
+      helper.fixtures.populateComponents(1, false, 'version3');
+      helper.command.tagWithoutBuild();
+      helper.command.export();
+      helper.command.checkoutVersion('0.0.2', 'comp1', '-x');
+      helper.command.snapComponentWithoutBuild('comp1', '--unmodified --detach-head');
+
+      // an intermediate step, make sure the component is detached
+      const comp = helper.command.catComponent('comp1');
+      expect(comp).to.have.property('detachedHeads');
+      expect(comp.detachedHeads.current).to.not.be.undefined;
+
+      helper.command.resetAll();
+    });
+    after(() => {
+      helper.command.resetFeatures();
+    });
+    it('expect .bitmap to point to the same version as it was before the reset, and not the latest', () => {
+      const bitmap = helper.bitMap.read();
+      expect(bitmap.comp1.version).to.equal('0.0.2');
+    });
+    it('should not show the component as modified', () => {
+      const status = helper.command.statusJson();
+      expect(status.modifiedComponents).to.have.lengthOf(0);
+    });
+    it('should clear the detached head', () => {
+      const comp = helper.command.catComponent('comp1');
+      expect(comp).to.not.have.property('detachedHeads');
+    });
+  });
+  // todo: delete this test once detach-head is not under feature-toggle
+  describe('when checked out to a non-head version without detach-head', () => {
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.fixtures.populateComponents(1, false);
+      helper.command.tagWithoutBuild();
+      helper.fixtures.populateComponents(1, false, 'version2');
+      helper.command.tagWithoutBuild();
+      helper.fixtures.populateComponents(1, false, 'version3');
+      helper.command.tagWithoutBuild();
+      helper.command.export();
+      helper.command.checkoutVersion('0.0.2', 'comp1', '-x');
+      helper.command.snapComponentWithoutBuild('comp1', '--unmodified');
+
+      helper.command.resetAll();
+    });
+    it('expect .bitmap to point to the same version as it was before the reset, and not the latest', () => {
+      const bitmap = helper.bitMap.read();
+      expect(bitmap.comp1.version).to.equal('0.0.2');
+    });
+    it('should not show the component as modified', () => {
+      const status = helper.command.statusJson();
+      expect(status.modifiedComponents).to.have.lengthOf(0);
     });
   });
 });

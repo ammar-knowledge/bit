@@ -2,9 +2,10 @@ import chai, { expect } from 'chai';
 import chalk from 'chalk';
 import path from 'path';
 import { uniq } from 'lodash';
-import { Extensions } from '../../src/constants';
-import { SchemaName } from '../../src/consumer/component/component-schema';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Extensions } from '@teambit/legacy.constants';
+import { SchemaName } from '@teambit/legacy.consumer-component';
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { DETACH_HEAD } from '@teambit/harmony.modules.feature-toggle';
 
 chai.use(require('chai-fs'));
 
@@ -232,9 +233,9 @@ describe('tag components on Harmony', function () {
       beforeTagScope = helper.scopeHelper.cloneLocalScope();
     });
     it('should fail without --skip-tests', () => {
-      expect(() => helper.command.tagAllComponents()).to.throw(
-        'Failed task 1: "teambit.defender/tester:TestComponents" of env "teambit.harmony/node"'
-      );
+      const cmd = () => helper.command.tagAllComponents();
+      const error = new Error('Failed task 1: "teambit.defender/tester:JestTest" of env "teambit.harmony/node"');
+      helper.general.expectToThrow(cmd, error);
       const stagedConfigPath = helper.general.getStagedConfigPath();
       expect(stagedConfigPath).to.not.be.a.path();
     });
@@ -242,9 +243,9 @@ describe('tag components on Harmony', function () {
       helper.scopeHelper.getClonedLocalScope(beforeTagScope);
       expect(() => helper.command.tagAllComponents('--skip-tests')).to.not.throw();
     });
-    it('should succeed with --force-deploy', () => {
+    it('should succeed with --ignore-build-errors', () => {
       helper.scopeHelper.getClonedLocalScope(beforeTagScope);
-      expect(() => helper.command.tagAllComponents('--force-deploy')).to.not.throw();
+      expect(() => helper.command.tagAllComponents('--ignore-build-errors')).to.not.throw();
     });
   });
   describe('modified one component, the rest are auto-tag pending', () => {
@@ -361,6 +362,23 @@ describe('tag components on Harmony', function () {
       expect(tagOutput).to.have.string('comp1@0.0.2-dev.0');
     });
   });
+  describe('invalid pre-release after normal tag', () => {
+    let result: string;
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.fixtures.populateComponents(1);
+      helper.command.tagAllWithoutBuild();
+      result = helper.general.runWithTryCatch(`bit tag --unmodified --pre-release "h?h"`);
+    });
+    it('should throw an error', () => {
+      expect(result).to.have.string('is not a valid semantic version');
+    });
+    it('should not create a new version', () => {
+      const comp = helper.command.catComponent('comp1');
+      const ver1Hash = comp.versions['0.0.1'];
+      expect(comp.head).to.equal(ver1Hash);
+    });
+  });
   describe('soft-tag pre-release', () => {
     let tagOutput: string;
     before(() => {
@@ -441,6 +459,57 @@ describe('tag components on Harmony', function () {
       );
       expect(pkgJson.version).to.equal('0.0.1');
       expect(pkgJson.componentId.version).to.equal('0.0.1');
+    });
+  });
+  describe('tagging a snapped component by specifying the id', () => {
+    let tagOutput: string;
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.fixtures.populateComponents(1);
+      helper.command.snapAllComponentsWithoutBuild();
+      tagOutput = helper.command.tagWithoutBuild('comp1');
+    });
+    it('should tag successfully without needing to add --unmodified', () => {
+      expect(tagOutput).to.have.string('comp1@0.0.1');
+    });
+  });
+  describe('maintain two main branches 1.x and 2.x, tagging the older branch 1.x with a patch', () => {
+    let ver2Head: string;
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.command.setFeatures(DETACH_HEAD);
+      helper.fixtures.populateComponents(1);
+      helper.command.tagAllWithoutBuild('--ver 1.0.0');
+      helper.fixtures.populateComponents(1, undefined, 'version2');
+      helper.command.tagAllWithoutBuild('--ver 2.0.0');
+      ver2Head = helper.command.getHead('comp1');
+      helper.command.export();
+      helper.command.checkoutVersion('1.0.0', 'comp1', '-x');
+      helper.fixtures.populateComponents(1, undefined, 'version101');
+      helper.command.tagAllWithoutBuild('--ver 1.0.1 --detach-head');
+      helper.command.export();
+    });
+    after(() => {
+      helper.command.resetFeatures();
+    });
+    it('should keep the head as 2.x and not change it to 1.0.1', () => {
+      const comp = helper.command.catComponent('comp1');
+      expect(comp.head).to.equal(ver2Head);
+    });
+    it('should update the .bitmap according to the patch version and not the head', () => {
+      const bitmap = helper.bitMap.read();
+      expect(bitmap.comp1.version).to.equal('1.0.1');
+    });
+    describe('importing the component to a new workspace', () => {
+      before(() => {
+        helper.scopeHelper.reInitLocalScope();
+        helper.scopeHelper.addRemoteScope();
+        helper.command.importComponent('comp1', '-x');
+      });
+      it('should import the latest: 2.x and not the patch 1.01', () => {
+        const bitmap = helper.bitMap.read();
+        expect(bitmap.comp1.version).to.equal('2.0.0');
+      });
     });
   });
 });

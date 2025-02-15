@@ -1,7 +1,6 @@
-import { PubsubAspect, PubsubMain } from '@teambit/pubsub';
 import { AspectLoaderAspect } from '@teambit/aspect-loader';
 import { BundlerAspect, BundlerMain } from '@teambit/bundler';
-import { CLIAspect, MainRuntime, CLIMain, CommandList } from '@teambit/cli';
+import { CLIAspect, MainRuntime, CLIMain, CommandList, Command } from '@teambit/cli';
 import { ComponentAspect } from '@teambit/component';
 import { EnvsAspect, EnvsMain } from '@teambit/envs';
 import { GraphqlAspect, GraphqlMain } from '@teambit/graphql';
@@ -16,11 +15,14 @@ import type { AspectLoaderMain } from '@teambit/aspect-loader';
 import { DependencyResolverAspect, DependencyResolverMain } from '@teambit/dependency-resolver';
 import type { ComponentMain, Component } from '@teambit/component';
 import type { VariantsMain } from '@teambit/variants';
-import { Consumer, loadConsumerIfExist } from '@teambit/legacy/dist/consumer';
-import ConsumerComponent from '@teambit/legacy/dist/consumer/component';
-import type { ComponentConfigLoadOptions } from '@teambit/legacy/dist/consumer/config';
-import { ExtensionDataList } from '@teambit/legacy/dist/consumer/config/extension-data';
-import LegacyComponentLoader, { ComponentLoadOptions } from '@teambit/legacy/dist/consumer/component/component-loader';
+import { Consumer, loadConsumerIfExist } from '@teambit/legacy.consumer';
+import type { ComponentConfigLoadOptions } from '@teambit/legacy.consumer-config';
+import { ExtensionDataList } from '@teambit/legacy.extension-data';
+import {
+  ComponentLoadOptions,
+  ComponentLoader as LegacyComponentLoader,
+  ConsumerComponent,
+} from '@teambit/legacy.consumer-component';
 import { ComponentID } from '@teambit/component-id';
 import { EXT_NAME } from './constants';
 import { OnComponentAdd, OnComponentChange, OnComponentRemove, OnComponentLoad } from './on-component-events';
@@ -38,9 +40,11 @@ import { EnvsReplaceCmd } from './envs-subcommands/envs-replace.cmd';
 import { ScopeSetCmd } from './scope-subcommands/scope-set.cmd';
 import { UseCmd } from './use.cmd';
 import { EnvsUpdateCmd } from './envs-subcommands/envs-update.cmd';
+import { UnuseCmd } from './unuse.cmd';
+import { LocalOnlyCmd, LocalOnlyListCmd, LocalOnlySetCmd, LocalOnlyUnsetCmd } from './commands/local-only-cmd';
+import { ConfigStoreAspect, ConfigStoreMain } from '@teambit/config-store';
 
 export type WorkspaceDeps = [
-  PubsubMain,
   CLIMain,
   ScopeMain,
   ComponentMain,
@@ -53,7 +57,8 @@ export type WorkspaceDeps = [
   BundlerMain,
   AspectLoaderMain,
   EnvsMain,
-  GlobalConfigMain
+  GlobalConfigMain,
+  ConfigStoreMain
 ];
 
 export type OnComponentLoadSlot = SlotRegistry<OnComponentLoad>;
@@ -79,7 +84,6 @@ export type OnRootAspectAddedSlot = SlotRegistry<OnRootAspectAdded>;
 export class WorkspaceMain {
   static runtime = MainRuntime;
   static dependencies = [
-    PubsubAspect,
     CLIAspect,
     ScopeAspect,
     ComponentAspect,
@@ -93,6 +97,7 @@ export class WorkspaceMain {
     AspectLoaderAspect,
     EnvsAspect,
     GlobalConfigAspect,
+    ConfigStoreAspect,
   ];
   static slots = [
     Slot.withType<OnComponentLoad>(),
@@ -106,7 +111,6 @@ export class WorkspaceMain {
   ];
   static async provider(
     [
-      pubsub,
       cli,
       scope,
       component,
@@ -120,6 +124,7 @@ export class WorkspaceMain {
       aspectLoader,
       envs,
       globalConfig,
+      configStore,
     ]: WorkspaceDeps,
     config: WorkspaceExtConfig,
     [
@@ -139,10 +144,15 @@ export class WorkspaceMain {
       OnAspectsResolveSlot,
       OnRootAspectAddedSlot,
       OnBitmapChangeSlot,
-      OnWorkspaceConfigChangeSlot
+      OnWorkspaceConfigChangeSlot,
     ],
     harmony: Harmony
   ) {
+    const currentCmd = process.argv[2];
+    if (currentCmd === 'init') {
+      // avoid loading the consumer/workspace for "bit init". otherwise, "bit init --reset" can't fix corrupted .bitmap
+      return undefined;
+    }
     const bitConfig: any = harmony.config.get('teambit.harmony/bit');
     const consumer = await getConsumer(bitConfig.cwd);
     if (!consumer) {
@@ -153,7 +163,6 @@ export class WorkspaceMain {
     // TODO: get the 'workspace' name in a better way
     const logger = loggerExt.createLogger(EXT_NAME);
     const workspace = new Workspace(
-      pubsub,
       config,
       consumer,
       scope,
@@ -162,7 +171,6 @@ export class WorkspaceMain {
       variants,
       aspectLoader,
       logger,
-      undefined,
       harmony,
       onComponentLoadSlot,
       onComponentChangeSlot,
@@ -174,8 +182,11 @@ export class WorkspaceMain {
       onRootAspectAddedSlot,
       graphql,
       onBitmapChangeSlot,
-      onWorkspaceConfigChangeSlot
+      onWorkspaceConfigChangeSlot,
+      configStore
     );
+
+    configStore.addStore('workspace', workspace.getConfigStore());
 
     const configMergeFile = workspace.getConflictMergeFile();
     await configMergeFile.loadIfNeeded();
@@ -233,12 +244,11 @@ export class WorkspaceMain {
       const defaultScope = await workspace.componentDefaultScope(componentId);
 
       const extensionsWithLegacyIdsP = extensions.map(async (extension) => {
-        const legacyEntry = extension.clone();
-        if (legacyEntry.extensionId) {
-          legacyEntry.newExtensionId = legacyEntry.extensionId;
+        if (extension.extensionId) {
+          extension.newExtensionId = extension.extensionId;
         }
 
-        return legacyEntry;
+        return extension;
       });
       const extensionsWithLegacyIds = await Promise.all(extensionsWithLegacyIdsP);
 
@@ -255,20 +265,34 @@ export class WorkspaceMain {
     });
     graphql.register(workspaceSchema);
     const capsuleCmd = getCapsulesCommands(isolator, scope, workspace);
-    const commands: CommandList = [new EjectConfCmd(workspace), capsuleCmd, new UseCmd(workspace)];
+    const commands: CommandList = [
+      new EjectConfCmd(workspace),
+      capsuleCmd,
+      new UseCmd(workspace),
+      new UnuseCmd(workspace),
+    ];
 
     commands.push(new PatternCommand(workspace));
+    const localOnlyCmd = new LocalOnlyCmd();
+    localOnlyCmd.commands = [
+      new LocalOnlySetCmd(workspace),
+      new LocalOnlyUnsetCmd(workspace),
+      new LocalOnlyListCmd(workspace),
+    ];
+    commands.push(localOnlyCmd);
     cli.register(...commands);
     component.registerHost(workspace);
 
-    cli.registerOnStart(async (_hasWorkspace: boolean, currentCommand: string) => {
-      if (currentCommand === 'mini-status' || currentCommand === 'ms') {
-        return; // mini-status should be super fast.
+    cli.registerOnStart(async (_hasWorkspace: boolean, currentCommand: string, commandObject?: Command) => {
+      const hasSafeModeFlag = process.argv.includes('--safe-mode');
+      if (hasSafeModeFlag || (commandObject && !commandObject.loadAspects)) {
+        return;
       }
       if (currentCommand === 'install') {
         workspace.inInstallContext = true;
       }
       await workspace.importCurrentLaneIfMissing();
+      logger.profile('workspace.registerOnStart');
       const loadAspectsOpts = {
         runSubscribers: false,
         skipDeps: !config.autoLoadAspectsDeps,
@@ -284,6 +308,7 @@ export class WorkspaceMain {
       componentIds.forEach((id) => {
         workspace.clearComponentCache(id);
       });
+      logger.profile('workspace.registerOnStart');
     });
 
     // add sub-commands "set" and "unset" to envs command.
@@ -292,6 +317,8 @@ export class WorkspaceMain {
     envsCommand?.commands?.push(new EnvsUnsetCmd(workspace)); // bit envs unset
     envsCommand?.commands?.push(new EnvsReplaceCmd(workspace)); // bit envs replace
     envsCommand?.commands?.push(new EnvsUpdateCmd(workspace)); // bit envs replace
+
+    envs.registerEnvJsoncResolver(workspace.resolveEnvManifest.bind(workspace));
 
     // add sub-command "set" to scope command.
     const scopeCommand = cli.getCommand('scope');

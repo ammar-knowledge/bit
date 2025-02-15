@@ -1,6 +1,8 @@
 import chalk from 'chalk';
 import yesno from 'yesno';
 import { Command, CommandOptions } from '@teambit/cli';
+import { isEmpty } from 'lodash';
+import { BitError } from '@teambit/bit-error';
 import { CloudMain } from './cloud.main.runtime';
 
 export class LoginCmd implements Command {
@@ -9,7 +11,10 @@ export class LoginCmd implements Command {
   group = 'general';
   alias = '';
   options = [
+    ['', 'skip-config-update', 'skip writing to the .npmrc file'],
+    ['', 'refresh-token', 'force refresh token even when logged in'],
     ['d', 'cloud-domain <domain>', 'login cloud domain (default bit.cloud)'],
+    ['', 'default-cloud-domain', 'login to default cloud domain (bit.cloud)'],
     ['p', 'port <port>', 'port number to open for localhost server (default 8085)'],
     ['', 'no-browser', 'do not open a browser for authentication'],
     [
@@ -22,10 +27,14 @@ export class LoginCmd implements Command {
   loader = true;
   remoteOp = true;
   skipWorkspace = true;
+  loadAspects = false;
 
   private port?: string;
 
-  constructor(private cloud: CloudMain, _port?: number) {
+  constructor(
+    private cloud: CloudMain,
+    _port?: number
+  ) {
     this.port = _port?.toString();
   }
 
@@ -33,24 +42,61 @@ export class LoginCmd implements Command {
     [], // eslint-disable-line no-empty-pattern
     {
       cloudDomain,
+      defaultCloudDomain,
       port,
       suppressBrowserLaunch,
       noBrowser,
       machineName,
+      skipConfigUpdate,
+      refreshToken,
     }: {
       cloudDomain?: string;
+      defaultCloudDomain: boolean;
       port: string;
       suppressBrowserLaunch?: boolean;
       noBrowser?: boolean;
       machineName?: string;
+      skipConfigUpdate?: boolean;
+      refreshToken?: boolean;
     }
   ): Promise<string> {
     noBrowser = noBrowser || suppressBrowserLaunch;
 
-    const result = await this.cloud.login(port || this.port, noBrowser, machineName, cloudDomain, undefined);
+    if (defaultCloudDomain && cloudDomain) {
+      throw new BitError('use either --default-cloud-domain or --cloud-domain, not both');
+    }
+
+    if (refreshToken) {
+      await this.cloud.logout();
+    }
+
+    const isLoggedIn = this.cloud.isLoggedIn();
+
+    if (isLoggedIn) {
+      this.cloud.logger.clearStatusLine();
+      const reLoginPrompt = chalk.yellow(
+        'You are already logged in. Do you want to re-login to refresh your access token? [yes(y)/no(n)]'
+      );
+      const ok = await yesno({ question: reLoginPrompt });
+      if (!ok) {
+        return chalk.green(`Logged in as ${this.cloud.getUsername()}`);
+      }
+      await this.cloud.logout();
+    }
+
+    const result = await this.cloud.login(
+      port || this.port,
+      noBrowser,
+      machineName,
+      cloudDomain,
+      undefined,
+      skipConfigUpdate,
+      defaultCloudDomain
+    );
+
     let message = chalk.green(`Logged in as ${result?.username}`);
 
-    if (result?.isAlreadyLoggedIn) {
+    if (skipConfigUpdate) {
       return message;
     }
 
@@ -60,6 +106,8 @@ export class LoginCmd implements Command {
     } else {
       message += this.getNpmrcUpdateMessage(result?.npmrcUpdateResult?.error);
     }
+
+    message = this.getGlobalConfigUpdatesMessage(result?.globalConfigUpdates) + message;
 
     return message;
   }
@@ -72,22 +120,40 @@ export class LoginCmd implements Command {
       suppressBrowserLaunch,
       noBrowser,
       machineName,
+      skipConfigUpdate,
+      defaultCloudDomain,
     }: {
       cloudDomain?: string;
       port: string;
       suppressBrowserLaunch?: boolean;
       noBrowser?: boolean;
       machineName?: string;
+      skipConfigUpdate?: boolean;
+      defaultCloudDomain?: boolean;
     }
-  ): Promise<{ username?: string; token?: string; successfullyUpdatedNpmrc?: boolean }> {
+  ): Promise<{
+    username?: string;
+    token?: string;
+    successfullyUpdatedNpmrc?: boolean;
+    globalConfigUpdates?: Record<string, string | undefined>;
+  }> {
     if (suppressBrowserLaunch) {
       noBrowser = true;
     }
-    const result = await this.cloud.login(port, noBrowser, machineName, cloudDomain);
+    const result = await this.cloud.login(
+      port,
+      noBrowser,
+      machineName,
+      cloudDomain,
+      undefined,
+      skipConfigUpdate,
+      defaultCloudDomain
+    );
     return {
       username: result?.username,
       token: result?.token,
       successfullyUpdatedNpmrc: !!result?.npmrcUpdateResult?.configUpdates,
+      globalConfigUpdates: result?.globalConfigUpdates,
     };
   }
 
@@ -116,7 +182,7 @@ Modification: ${chalk.green(conflict.modifications)}`
     try {
       await this.cloud.generateNpmrc({ force: true });
       return chalk.green(' and .npmrc updated successfully after resolving conflicts.');
-    } catch (e) {
+    } catch {
       return `${chalk.red(' but failed to update .npmrc after resolving conflicts.')} Visit ${chalk.bold(
         'https://bit.dev/reference/packages/npmrc'
       )} for instructions on how to update it manually.`;
@@ -133,4 +199,15 @@ Modification: ${chalk.green(conflict.modifications)}`
       )} for instructions on how to update it manually.`
     );
   }
+
+  getGlobalConfigUpdatesMessage = (globalConfigUpdates: Record<string, string | undefined> | undefined): string => {
+    if (!globalConfigUpdates || isEmpty(globalConfigUpdates)) return '';
+    const updates = Object.entries(globalConfigUpdates)
+      .map(([key, value]) => {
+        const entryStr = value === '' ? `${key} (removed)` : `${key}: ${value} (updated)`;
+        return entryStr;
+      })
+      .join('\n');
+    return chalk.greenBright(`\nGlobal config changes:\n${updates}\n\n`);
+  };
 }

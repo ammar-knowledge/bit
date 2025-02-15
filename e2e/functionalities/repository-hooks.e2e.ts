@@ -1,7 +1,7 @@
 import chai, { expect } from 'chai';
 import path from 'path';
 
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -26,7 +26,7 @@ describe('repository-hooks', function () {
       );
       helper.scopeJson.addKeyVal('hooksPath', './repository-hooks.js', helper.scopes.remotePath);
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       helper.fixtures.tagComponentBarFoo();
       exportOutput = helper.command.export();
       helper.scopeHelper.reInitLocalScope();

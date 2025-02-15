@@ -10,6 +10,11 @@ import { deprecationSchema } from './deprecation.graphql';
 import { DeprecationFragment } from './deprecation.fragment';
 import { DeprecateCmd } from './deprecate-cmd';
 import { UndeprecateCmd } from './undeprecate-cmd';
+import { IssuesAspect, IssuesMain } from '@teambit/issues';
+import pMapSeries from 'p-map-series';
+import { DependencyResolverAspect, DependencyResolverMain } from '@teambit/dependency-resolver';
+import { compact } from 'lodash';
+import { IssuesClasses } from '@teambit/component-issues';
 
 export type DeprecationInfo = {
   isDeprecate: boolean;
@@ -33,9 +38,11 @@ export type DeprecationMetadata = {
 };
 
 export class DeprecationMain {
-  constructor(private scope: ScopeMain, private workspace: Workspace) {}
-  static runtime = MainRuntime;
-  static dependencies = [GraphqlAspect, ScopeAspect, ComponentAspect, WorkspaceAspect, CLIAspect];
+  constructor(
+    private scope: ScopeMain,
+    private workspace: Workspace,
+    private depsResolver: DependencyResolverMain
+  ) {}
 
   async getDeprecationInfo(component: Component): Promise<DeprecationInfo> {
     const headComponent = await this.getHeadComponent(component);
@@ -90,6 +97,17 @@ export class DeprecationMain {
     return results;
   }
 
+  async deprecateByCLIValues(id: string, newId?: string, range?: string): Promise<boolean> {
+    const componentId = await this.workspace.resolveComponentId(id);
+    const newComponentId = newId ? await this.workspace.resolveComponentId(newId) : undefined;
+    return this.deprecate(componentId, newComponentId, range);
+  }
+
+  async unDeprecateByCLIValues(id: string): Promise<boolean> {
+    const componentId = await this.workspace.resolveComponentId(id);
+    return this.unDeprecate(componentId);
+  }
+
   async unDeprecate(componentId: ComponentID) {
     const results = this.workspace.bitMap.addComponentConfig(componentId, DeprecationAspect.id, {
       deprecate: false,
@@ -100,15 +118,66 @@ export class DeprecationMain {
     return results;
   }
 
-  static async provider([graphql, scope, componentAspect, workspace, cli]: [
+  async addDeprecatedDependenciesIssues(components: Component[]) {
+    await pMapSeries(components, async (component) => {
+      await this.addDeprecatedDepIssue(component);
+    });
+  }
+
+  private async addDeprecatedDepIssue(component: Component) {
+    const dependencies = this.depsResolver.getComponentDependencies(component);
+    const removedWithUndefined = await Promise.all(
+      dependencies.map(async (dep) => {
+        const isRemoved = await this.isDeprecatedByIdWithoutLoadingComponent(dep.componentId);
+        if (isRemoved) return dep.componentId;
+        return undefined;
+      })
+    );
+    const removed = compact(removedWithUndefined).map((id) => id.toString());
+    if (removed.length) {
+      component.state.issues.getOrCreate(IssuesClasses.DeprecatedDependencies).data = removed;
+    }
+  }
+
+  /**
+   * performant version of isDeprecated() in case the component object is not available and loading it is expensive.
+   */
+  private async isDeprecatedByIdWithoutLoadingComponent(componentId: ComponentID): Promise<boolean> {
+    if (!componentId.hasVersion()) return false;
+    const bitmapEntry = this.workspace.bitMap.getBitmapEntryIfExist(componentId);
+    if (bitmapEntry && bitmapEntry.isDeprecated()) return true;
+    if (bitmapEntry && bitmapEntry.isUndeprecated()) return false;
+    const modelComp = await this.workspace.scope.getBitObjectModelComponent(componentId);
+    if (!modelComp) return false;
+    const isDeprecated = await modelComp.isDeprecated(
+      this.workspace.scope.legacyScope.objects,
+      componentId.version as string
+    );
+    return Boolean(isDeprecated);
+  }
+
+  static runtime = MainRuntime;
+  static dependencies = [
+    GraphqlAspect,
+    ScopeAspect,
+    ComponentAspect,
+    WorkspaceAspect,
+    CLIAspect,
+    DependencyResolverAspect,
+    IssuesAspect,
+  ];
+  static async provider([graphql, scope, componentAspect, workspace, cli, depsResolver, issues]: [
     GraphqlMain,
     ScopeMain,
     ComponentMain,
     Workspace,
-    CLIMain
+    CLIMain,
+    DependencyResolverMain,
+    IssuesMain,
   ]) {
-    const deprecation = new DeprecationMain(scope, workspace);
-    cli.register(new DeprecateCmd(deprecation, workspace), new UndeprecateCmd(deprecation, workspace));
+    const deprecation = new DeprecationMain(scope, workspace, depsResolver);
+    issues.registerAddComponentsIssues(deprecation.addDeprecatedDependenciesIssues.bind(deprecation));
+    cli.register(new DeprecateCmd(deprecation), new UndeprecateCmd(deprecation));
     componentAspect.registerShowFragments([new DeprecationFragment(deprecation)]);
     graphql.register(deprecationSchema(deprecation));
 

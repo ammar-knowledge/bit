@@ -15,22 +15,22 @@ export class AppListCmd implements Command {
 
   constructor(private applicationAspect: ApplicationMain) {}
 
-  async report(args: [string], { json }: { json: boolean }) {
-    const appComponents = this.applicationAspect.mapApps();
-    if (json) return JSON.stringify(appComponents, null, 2);
-    if (!appComponents.length) return chalk.yellow('no apps found');
-
-    const rows = appComponents.flatMap(([id, apps]) => {
-      return apps.map((app) => [id, app.name]);
-    });
-
+  async report() {
+    const idsAndNames = await this.applicationAspect.listAppsIdsAndNames();
+    if (!idsAndNames.length) return chalk.yellow('no apps found');
+    const rows = idsAndNames.map(({ id, name }) => [id, name]);
     const table = new CLITable(['id', 'name'], rows);
     return table.render();
+  }
+
+  async json() {
+    const idsAndNames = await this.applicationAspect.listAppsIdsAndNames();
+    return idsAndNames;
   }
 }
 
 export class AppCmd implements Command {
-  name = 'app <sub-command>';
+  name = 'app [sub-command]';
   description = 'Manages apps';
   helpUrl = 'docs/getting-started/composing/create-apps';
   alias = 'apps';
@@ -38,9 +38,10 @@ export class AppCmd implements Command {
   commands: Command[] = [];
   options = [] as CommandOptions;
 
+  constructor(private applicationAspect: ApplicationMain) {}
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async report(args: [string]) {
-    // it should never be here. Yargs throws an error before reaching this method.
-    return `Please specify a sub-command`;
+    return new AppListCmd(this.applicationAspect).report();
   }
 }

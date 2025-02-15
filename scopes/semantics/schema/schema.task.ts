@@ -24,7 +24,11 @@ export class SchemaTask implements BuildTask {
   readonly location: TaskLocation = 'end';
   readonly description = 'extract api schema for a set of components';
 
-  constructor(readonly aspectId: string, private schema: SchemaMain, private logger: Logger) {}
+  constructor(
+    readonly aspectId: string,
+    private schema: SchemaMain,
+    private logger: Logger
+  ) {}
 
   async execute(context: BuildContext): Promise<BuiltTaskResult> {
     const startTime = Date.now();
@@ -70,11 +74,10 @@ export function getSchemaArtifactPath() {
   return join(CAPSULE_ARTIFACTS_DIR, 'schema.json');
 }
 
-export function getSchemaArtifactDef() {
+export function getSchemaArtifactDef(): ArtifactDefinition {
   const def: ArtifactDefinition = {
     name: SCHEMA_ARTIFACT_NAME,
-    rootDir: CAPSULE_ARTIFACTS_DIR,
-    globPatterns: ['schema.json'],
+    globPatterns: [getSchemaArtifactPath()],
   };
 
   return def;

@@ -97,6 +97,9 @@ export class TesterService implements EnvService<Tests, TesterDescriptor> {
   }
 
   async run(context: ExecutionContext, options: TesterOptions): Promise<Tests> {
+    if (!context.env.getTester) {
+      return new Tests([]);
+    }
     const tester: Tester = context.env.getTester();
     const specFiles = ComponentMap.as(context.components, (component) => {
       return detectTestFiles(component, this.devFiles);
@@ -150,6 +153,7 @@ export class TesterService implements EnvService<Tests, TesterDescriptor> {
       watch: options.watch,
       ui: options.ui,
       coverage: options.coverage,
+      updateSnapshot: options.updateSnapshot,
       additionalHostDependencies,
     });
 

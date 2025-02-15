@@ -1,7 +1,7 @@
 import chai, { expect } from 'chai';
 import { IssuesClasses } from '@teambit/component-issues';
-import { statusFailureMsg } from '../../src/constants';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { statusFailureMsg } from '@teambit/legacy.constants';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -206,7 +206,7 @@ describe('workspace config', function () {
           helper.fixtures.createComponentBarFoo("import chai from 'chai';");
           helper.npm.addFakeNpmPackage('chai', '2.2.0');
           helper.packageJson.create({ peerDependencies: { chai: '>= 2.1.2 < 5' } });
-          helper.fixtures.addComponentBarFooAsDir();
+          helper.fixtures.addComponentBarFoo();
           const policy = {
             peerDependencies: {
               chai: '-',
@@ -318,7 +318,7 @@ describe('workspace config', function () {
           helper.fixtures.createComponentBarFoo("import chai from 'chai';");
           helper.npm.addFakeNpmPackage('chai', '2.2.0');
           helper.packageJson.create({ dependencies: { chai: '2.2.0' } });
-          helper.fixtures.addComponentBarFooAsDir();
+          helper.fixtures.addComponentBarFoo();
           const policy = {
             dependencies: {
               chai: '-',
@@ -353,7 +353,7 @@ describe('workspace config', function () {
         before(() => {
           helper.scopeHelper.reInitLocalScope();
           helper.fixtures.createComponentBarFoo("import chai from 'chai';");
-          helper.fixtures.addComponentBarFooAsDir();
+          helper.fixtures.addComponentBarFoo();
           const policy = {
             peerDependencies: {
               chai: '2.2.0',
@@ -376,7 +376,7 @@ describe('workspace config', function () {
         before(() => {
           helper.scopeHelper.reInitLocalScope();
           helper.fixtures.createComponentBarFoo("import chai from 'chai';");
-          helper.fixtures.addComponentBarFooAsDir();
+          helper.fixtures.addComponentBarFoo();
           const policy = {
             peerDependencies: {
               chai: '+',

@@ -14,11 +14,10 @@ import { BuilderMain, BuilderAspect } from '@teambit/builder';
 import { BitError } from '@teambit/bit-error';
 import { snapToSemver } from '@teambit/component-package-version';
 import { IssuesClasses } from '@teambit/component-issues';
-import { AbstractVinyl } from '@teambit/legacy/dist/consumer/component/sources';
+import { AbstractVinyl } from '@teambit/component.sources';
 import { GraphqlMain, GraphqlAspect } from '@teambit/graphql';
 import { DependencyResolverAspect, DependencyResolverMain } from '@teambit/dependency-resolver';
-import { getMaxSizeForComponents, InMemoryCache } from '@teambit/legacy/dist/cache/in-memory-cache';
-import { createInMemoryCache } from '@teambit/legacy/dist/cache/cache-factory';
+import { getMaxSizeForComponents, InMemoryCache, createInMemoryCache } from '@teambit/harmony.modules.in-memory-cache';
 import { Packer, PackOptions, PackResult, TAR_FILE_ARTIFACT_NAME } from './packer';
 // import { BitCli as CLI, BitCliExt as CLIExtension } from '@teambit/cli';
 import { PackCmd } from './pack.cmd';
@@ -128,7 +127,7 @@ export class PkgMain {
       BuilderMain,
       DependencyResolverMain,
       ComponentMain,
-      GraphqlMain
+      GraphqlMain,
     ],
     config: PkgExtensionConfig,
     [packageJsonPropsRegistry]: [PackageJsonPropsRegistry]
@@ -168,8 +167,8 @@ export class PkgMain {
     const preparePackagesTask = new PreparePackagesTask(PkgAspect.id, logPublisher, envs);
     // dryRunTask.dependencies = [BuildTaskHelper.serializeId(preparePackagesTask)];
     builder.registerBuildTasks([preparePackagesTask]);
-    builder.registerTagTasks([packTask, publishTask]);
-    builder.registerSnapTasks([packTask]);
+    builder.registerTagTasks([preparePackagesTask, packTask, publishTask]);
+    builder.registerSnapTasks([preparePackagesTask, packTask]);
 
     const calcPkgOnLoad = async (component: Component) => {
       const data = await pkg.mergePackageJsonProps(component);
@@ -207,7 +206,10 @@ export class PkgMain {
    * This is used in cases you want to actually run the components and make sure all the dependencies (especially peers) are resolved correctly
    */
   getRuntimeModulePath(component: Component, options: GetModulePathOptions = {}) {
-    const relativePath = this.dependencyResolver.getRuntimeModulePath(component);
+    const relativePath = this.dependencyResolver.getRuntimeModulePath(component, {
+      workspacePath: this.workspace.path,
+      rootComponentsPath: this.workspace.rootComponentsPath,
+    });
     if (options?.absPath) {
       if (this.workspace) {
         return join(this.workspace.path, relativePath);
@@ -489,7 +491,12 @@ export class PkgMain {
     packageJsonObject: Record<string, any>
   ): Promise<Record<string, any>> {
     const newProps = this.getPackageJsonModifications(component);
-    return Object.assign(packageJsonObject, newProps);
+    const pkgJsonObj = Object.assign(packageJsonObject, newProps);
+    const env = this.envs.getOrCalculateEnv(component).env;
+    if (env.modifyPackageJson) {
+      return env.modifyPackageJson(component, pkgJsonObj);
+    }
+    return pkgJsonObj;
   }
 }
 

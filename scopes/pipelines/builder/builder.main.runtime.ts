@@ -1,22 +1,23 @@
 import { cloneDeep } from 'lodash';
-import { ArtifactVinyl } from '@teambit/legacy/dist/consumer/component/sources/artifact';
-import { ArtifactFiles, ArtifactObject } from '@teambit/legacy/dist/consumer/component/sources/artifact-files';
+import { ConsumerComponent } from '@teambit/legacy.consumer-component';
+import { ArtifactVinyl, ArtifactFiles, ArtifactObject } from '@teambit/component.sources';
 import { AspectLoaderAspect, AspectLoaderMain } from '@teambit/aspect-loader';
 import { CLIAspect, CLIMain, MainRuntime } from '@teambit/cli';
 import { Component, ComponentMap, IComponent, ComponentAspect, ComponentMain, ComponentID } from '@teambit/component';
 import { EnvsAspect, EnvsMain } from '@teambit/envs';
 import { GraphqlAspect, GraphqlMain } from '@teambit/graphql';
 import { Slot, SlotRegistry } from '@teambit/harmony';
-import { GlobalConfigAspect, GlobalConfigMain } from '@teambit/global-config';
 import { Logger, LoggerAspect, LoggerMain } from '@teambit/logger';
-import AspectAspect from '@teambit/aspect';
+import { AspectAspect } from '@teambit/aspect';
 import { ScopeAspect, ScopeMain } from '@teambit/scope';
 import { Workspace, WorkspaceAspect } from '@teambit/workspace';
 import { IsolateComponentsOptions, IsolatorAspect, IsolatorMain } from '@teambit/isolator';
-import { getHarmonyVersion } from '@teambit/legacy/dist/bootstrap';
+import { getBitVersion } from '@teambit/bit.get-bit-version';
 import { findDuplications } from '@teambit/toolbox.array.duplications-finder';
 import { GeneratorAspect, GeneratorMain } from '@teambit/generator';
 import { UIAspect, UiMain, BundleUiTask } from '@teambit/ui';
+import { IssuesAspect, IssuesMain } from '@teambit/issues';
+import { BitError } from '@teambit/bit-error';
 import { Artifact, ArtifactList, FsArtifact } from './artifact';
 import { ArtifactFactory } from './artifact/artifact-factory'; // it gets undefined when importing it from './artifact'
 import { BuilderAspect } from './builder.aspect';
@@ -32,6 +33,8 @@ import { TaskMetadata } from './types';
 import { ArtifactsCmd } from './artifact/artifacts.cmd';
 import { buildTaskTemplate } from './templates/build-task';
 import { BuilderRoute } from './builder.route';
+import { ComponentsHaveIssues } from './exceptions/components-have-issues';
+import { ConfigStoreAspect, ConfigStoreMain } from '@teambit/config-store';
 
 export type TaskSlot = SlotRegistry<BuildTask[]>;
 export type OnTagResults = { builderDataMap: ComponentMap<RawBuilderData>; pipeResults: TaskResultsList[] };
@@ -71,27 +74,28 @@ export class BuilderMain {
     private isolator: IsolatorMain,
     private aspectLoader: AspectLoaderMain,
     private componentAspect: ComponentMain,
-    private globalConfig: GlobalConfigMain,
     private buildTaskSlot: TaskSlot,
     private tagTaskSlot: TaskSlot,
     private snapTaskSlot: TaskSlot,
-    private logger: Logger
+    private logger: Logger,
+    private issues: IssuesMain
   ) {}
 
   private async storeArtifacts(tasksResults: TaskResults[]) {
     const artifacts = tasksResults.flatMap((t) => (t.artifacts ? [t.artifacts] : []));
-    const storeP = artifacts.map(async (artifactMap: ComponentMap<ArtifactList<FsArtifact>>) => {
-      return Promise.all(
-        artifactMap.toArray().map(async ([component, artifactList]) => {
-          try {
-            return await artifactList.store(component);
-          } catch (err: any) {
-            throw new ArtifactStorageError(err, component);
-          }
-        })
-      );
-    });
-    await Promise.all(storeP);
+    await Promise.all(
+      artifacts.map(async (artifactMap: ComponentMap<ArtifactList<FsArtifact>>) => {
+        await Promise.all(
+          artifactMap.toArray().map(async ([component, artifactList]) => {
+            try {
+              await artifactList.store(component);
+            } catch (err: any) {
+              throw new ArtifactStorageError(err, component.id.toString());
+            }
+          })
+        );
+      })
+    );
   }
 
   pipelineResultsToBuilderData(
@@ -103,7 +107,7 @@ export class BuilderMain {
       const aspectsData = buildPipelineResultList.getDataOfComponent(component.id);
       const pipelineReport = buildPipelineResultList.getPipelineReportOfComponent(component.id);
       const artifacts = buildPipelineResultList.getArtifactsDataOfComponent(component.id);
-      return { pipeline: pipelineReport, artifacts, aspectsData, bitVersion: getHarmonyVersion(true) };
+      return { pipeline: pipelineReport, artifacts, aspectsData, bitVersion: getBitVersion() };
     });
   }
 
@@ -124,7 +128,8 @@ export class BuilderMain {
         ...builderOptions,
         // even when build is skipped (in case of tag-from-scope), the pre-build/post-build and teambit.harmony/aspect tasks are needed
         tasks: populateArtifactsFrom ? [AspectAspect.id] : undefined,
-      }
+      },
+      { ignoreIssues: '*' }
     );
     if (throwOnError && !forceDeploy) buildEnvsExecutionResults.throwErrorsIfExist();
     allTasksResults.push(...buildEnvsExecutionResults.tasksResults);
@@ -177,7 +182,7 @@ export class BuilderMain {
         if (this.envs.isUsingCoreEnv(comp)) {
           return [comp.id.toString(), { envId, inWs: false, lastTaggedEnvHasOnlyOverview: false }] as [
             string,
-            { envId: string; inWs: boolean; lastTaggedEnvHasOnlyOverview?: boolean; isEnvTaggedWithComp?: boolean }
+            { envId: string; inWs: boolean; lastTaggedEnvHasOnlyOverview?: boolean; isEnvTaggedWithComp?: boolean },
           ];
         }
 
@@ -185,7 +190,7 @@ export class BuilderMain {
         if (envId && !compsBeingTaggedLookup.has(comp.id.toString())) {
           return [comp.id.toString(), { envId, isEnvTaggedWithComp: false }] as [
             string,
-            { envId: string; inWs?: boolean; lastTaggedEnvHasOnlyOverview?: boolean; isEnvTaggedWithComp?: boolean }
+            { envId: string; inWs?: boolean; lastTaggedEnvHasOnlyOverview?: boolean; isEnvTaggedWithComp?: boolean },
           ];
         }
 
@@ -198,7 +203,7 @@ export class BuilderMain {
 
         return [comp.id.toString(), { envId, inWs, lastTaggedEnvHasOnlyOverview, isEnvTaggedWithComp: true }] as [
           string,
-          { envId: string; inWs: boolean; lastTaggedEnvHasOnlyOverview: boolean; isEnvTaggedWithComp?: boolean }
+          { envId: string; inWs: boolean; lastTaggedEnvHasOnlyOverview: boolean; isEnvTaggedWithComp?: boolean },
         ];
       })
     );
@@ -366,8 +371,9 @@ export class BuilderMain {
     components: Component[],
     isolateOptions?: IsolateComponentsOptions,
     builderOptions?: BuilderServiceOptions,
-    extraOptions?: { includeTag?: boolean; includeSnap?: boolean }
+    extraOptions?: { includeTag?: boolean; includeSnap?: boolean; ignoreIssues?: string }
   ): Promise<TaskResultsList> {
+    await this.throwForVariousIssues(components, extraOptions?.ignoreIssues);
     const ids = components.map((c) => c.id);
     const capsulesBaseDir = this.buildService.getComponentsCapsulesBaseDir();
     const baseIsolateOpts = {
@@ -385,7 +391,7 @@ export class BuilderMain {
       seedersOnly: isolateOptions?.seedersOnly,
       originalSeeders: ids,
       capsulesBaseDir,
-      ...(builderOptions || {}),
+      ...builderOptions,
     };
     this.logger.consoleTitle(`Total ${components.length} components to build`);
     const buildResult: TaskResultsList = await envs.runOnce(this.buildService, builderServiceOptions);
@@ -465,6 +471,34 @@ export class BuilderMain {
     return `/api/${componentId}/~aspect/builder/${taskId}/${path ? `${FILE_PATH_PARAM_DELIM}${path}` : ''}`;
   }
 
+  private async throwForVariousIssues(components: Component[], ignoreIssues?: string) {
+    const componentsToCheck = components.filter((c) => !c.isDeleted());
+    await this.throwForComponentIssues(componentsToCheck, ignoreIssues);
+  }
+
+  async throwForComponentIssues(components: Component[], ignoreIssues?: string) {
+    if (ignoreIssues === '*') {
+      // ignore all issues
+      return;
+    }
+    const issuesToIgnoreFromFlag = ignoreIssues?.split(',').map((issue) => issue.trim()) || [];
+    const issuesToIgnoreFromConfig = this.issues.getIssuesToIgnoreGlobally();
+    const issuesToIgnore = [...issuesToIgnoreFromFlag, ...issuesToIgnoreFromConfig];
+    await this.issues.triggerAddComponentIssues(components, issuesToIgnore);
+    this.issues.removeIgnoredIssuesFromComponents(components, issuesToIgnore);
+    const legacyComponents = components.map((c) => c.state._consumer) as ConsumerComponent[];
+    const componentsWithBlockingIssues = legacyComponents.filter((component) => component.issues?.shouldBlockTagging());
+    if (componentsWithBlockingIssues.length) {
+      throw new ComponentsHaveIssues(componentsWithBlockingIssues);
+    }
+
+    const workspaceIssues = this.workspace.getWorkspaceIssues();
+    if (workspaceIssues.length) {
+      const issuesStr = workspaceIssues.map((issueErr) => issueErr.message).join('\n');
+      throw new BitError(`the workspace has the following issues:\n${issuesStr}`);
+    }
+  }
+
   static slots = [Slot.withType<BuildTask>(), Slot.withType<BuildTask>(), Slot.withType<BuildTask>()];
 
   static runtime = MainRuntime;
@@ -480,11 +514,26 @@ export class BuilderMain {
     GeneratorAspect,
     ComponentAspect,
     UIAspect,
-    GlobalConfigAspect,
+    ConfigStoreAspect,
+    IssuesAspect,
   ];
 
   static async provider(
-    [cli, envs, workspace, scope, isolator, loggerExt, aspectLoader, graphql, generator, component, ui, globalConfig]: [
+    [
+      cli,
+      envs,
+      workspace,
+      scope,
+      isolator,
+      loggerExt,
+      aspectLoader,
+      graphql,
+      generator,
+      component,
+      ui,
+      configStore,
+      issues,
+    ]: [
       CLIMain,
       EnvsMain,
       Workspace,
@@ -496,7 +545,8 @@ export class BuilderMain {
       GeneratorMain,
       ComponentMain,
       UiMain,
-      GlobalConfigMain
+      ConfigStoreMain,
+      IssuesMain,
     ],
     config,
     [buildTaskSlot, tagTaskSlot, snapTaskSlot]: [TaskSlot, TaskSlot, TaskSlot]
@@ -511,7 +561,7 @@ export class BuilderMain {
       'build',
       artifactFactory,
       scope,
-      globalConfig
+      configStore
     );
     envs.registerService(buildService);
     const tagService = new BuilderService(
@@ -522,7 +572,7 @@ export class BuilderMain {
       'tag',
       artifactFactory,
       scope,
-      globalConfig
+      configStore
     );
     const snapService = new BuilderService(
       isolator,
@@ -532,7 +582,7 @@ export class BuilderMain {
       'snap',
       artifactFactory,
       scope,
-      globalConfig
+      configStore
     );
     const builder = new BuilderMain(
       envs,
@@ -544,11 +594,11 @@ export class BuilderMain {
       isolator,
       aspectLoader,
       component,
-      globalConfig,
       buildTaskSlot,
       tagTaskSlot,
       snapTaskSlot,
-      logger
+      logger,
+      issues
     );
     builder.registerBuildTasks([new BundleUiTask(ui, logger)]);
     component.registerRoute([new BuilderRoute(builder, scope, logger)]);

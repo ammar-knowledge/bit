@@ -15,6 +15,7 @@ import { useIsMobile } from '@teambit/ui-foundation.ui.hooks.use-is-mobile';
 import { WidgetProps } from '@teambit/ui-foundation.ui.tree.tree-node';
 import { getFileIcon, FileIconMatch } from '@teambit/code.ui.utils.get-file-icon';
 import { useCodeParams } from '@teambit/code.ui.hooks.use-code-params';
+import path from 'path-browserify';
 import { TreeNode } from '@teambit/design.ui.tree';
 import {
   useComponentArtifactFileContent,
@@ -35,61 +36,99 @@ export type CodePageProps = {
   codeViewClassName?: string;
 } & HTMLAttributes<HTMLDivElement>;
 
+/**
+ * Resolves a requested file path against a file tree, handling extension mappings,
+ * parent directory traversal, and index files.
+ *
+ * @param requestedPath The path to resolve (can include ./, ../, etc)
+ * @param fileTree Array of available files
+ * @param mainFile Default file to return if no match is found
+ * @param loadingCode Whether code is currently loading
+ * @returns Resolved file path or undefined if loading
+ */
+export function resolveFilePath(
+  requestedPath: string | undefined,
+  fileTree: string[],
+  mainFile: string,
+  loadingCode: boolean
+): string | undefined {
+  if (loadingCode) return undefined;
+  if (!requestedPath) return mainFile;
+
+  const normalized = path.resolve(requestedPath);
+
+  if (fileTree.includes(normalized)) return normalized;
+
+  const requestedExt = path.extname(normalized);
+  const basePathWithoutExt = requestedExt ? normalized.slice(0, -requestedExt.length) : normalized;
+
+  const getTypeScriptVariants = (ext: string): string[] => {
+    switch (ext) {
+      case '.js':
+        return ['.ts', '.tsx'];
+      case '.jsx':
+        return ['.tsx'];
+      case '.mjs':
+        return ['.mts'];
+      case '.cjs':
+        return ['.cts'];
+      default:
+        return [];
+    }
+  };
+
+  const possibleExtensions = requestedExt
+    ? [requestedExt, ...getTypeScriptVariants(requestedExt)]
+    : ['.ts', '.tsx', '.js'];
+
+  const possiblePaths = [
+    normalized,
+    ...possibleExtensions.map((ext) => `${basePathWithoutExt}${ext}`),
+    ...possibleExtensions.map((ext) => path.join(normalized, `index${ext}`)),
+    ...possibleExtensions.map((ext) => path.join(basePathWithoutExt, `index${ext}`)),
+  ].map((p) => path.resolve(p));
+
+  const matchingFiles = fileTree.filter((file) => possiblePaths.includes(path.resolve(file)));
+
+  if (matchingFiles.length > 0) {
+    if (matchingFiles.includes(normalized)) {
+      return normalized;
+    }
+
+    const ordered = matchingFiles.sort((a, b) => {
+      const extA = path.extname(a);
+      const extB = path.extname(b);
+
+      if (extA === requestedExt && extB !== requestedExt) return -1;
+      if (extB === requestedExt && extA !== requestedExt) return 1;
+
+      const isTypeScriptA = ['.ts', '.tsx'].includes(extA);
+      const isTypeScriptB = ['.ts', '.tsx'].includes(extB);
+      if (isTypeScriptA && !isTypeScriptB) return -1;
+      if (isTypeScriptB && !isTypeScriptA) return 1;
+
+      if (extA === '.ts' && extB === '.tsx') return -1;
+      if (extA === '.tsx' && extB === '.ts') return 1;
+
+      return a.length - b.length;
+    });
+
+    return ordered[0];
+  }
+
+  return mainFile;
+}
+
 export function CodePage({ className, fileIconSlot, host, codeViewClassName }: CodePageProps) {
   const urlParams = useCodeParams();
   const [searchParams] = useSearchParams();
   const scopeFromQueryParams = searchParams.get('scope');
   const component = useContext(ComponentContext);
-  const [fileParam, setFileParam] = useState<{
-    current?: string;
-    prev?: string;
-  }>({ current: urlParams.file });
-
-  React.useEffect(() => {
-    if (urlParams.file !== fileParam.current) {
-      setFileParam((prev) => ({ current: urlParams.file, prev: prev.current }));
-    }
-  }, [urlParams.file, fileParam.current]);
 
   const { mainFile, fileTree = [], dependencies, devFiles, loading: loadingCode } = useCode(component.id);
   const { data: artifacts = [] } = useComponentArtifacts(host, component.id.toString());
-  const currentFile = loadingCode
-    ? undefined
-    : (() => {
-        if (urlParams.file && fileTree.includes(urlParams.file)) {
-          return urlParams.file;
-        }
-        if (!urlParams.file) return mainFile;
 
-        const extractNameAndExtension = (filename) => {
-          const match = filename.match(/^(.*?)(\.[^.]+)?$/);
-          return [match[1], match[2]];
-        };
-
-        const [currentBase] = extractNameAndExtension(fileParam.current || '');
-        const mainFileExt = extractNameAndExtension(mainFile)[1];
-        const [, prevExt] = fileParam.prev ? extractNameAndExtension(fileParam.prev) : [null, null];
-
-        const matchingFiles = fileTree.filter((file) => {
-          const [fileBase] = extractNameAndExtension(file);
-          return fileBase === currentBase || fileBase === fileParam.current;
-        });
-
-        if (matchingFiles.length === 1) {
-          return matchingFiles[0];
-        }
-
-        const preferredExt = prevExt || mainFileExt;
-        if (preferredExt) {
-          const exactExtensionMatch = matchingFiles.find((file) => {
-            const [, fileExt] = extractNameAndExtension(file);
-            return fileExt === preferredExt;
-          });
-          if (exactExtensionMatch) return exactExtensionMatch;
-        }
-
-        return matchingFiles[0] || mainFile;
-      })();
+  const currentFile = resolveFilePath(urlParams.file, fileTree, mainFile, loadingCode);
 
   const currentArtifact = getArtifactFileDetailsFromUrl(artifacts, currentFile);
   const currentArtifactFile = currentArtifact?.artifactFile;
@@ -131,7 +170,7 @@ export function CodePage({ className, fileIconSlot, host, codeViewClassName }: C
   );
 
   const sortedDeps = useMemo(() => {
-    // need to create a new instance of dependecies because we cant mutate the original array
+    // need to create a new instance of dependencies because we cant mutate the original array
     return [...(dependencies ?? [])].sort((a, b) => {
       return (a.packageName || a.id).localeCompare(b.packageName || b.id);
     });

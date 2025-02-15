@@ -21,7 +21,10 @@ export type LinterConfig = {
 export class LinterMain {
   static runtime = MainRuntime;
 
-  constructor(private envs: EnvsMain, private linterService: LinterService) {}
+  constructor(
+    private envs: EnvsMain,
+    private linterService: LinterService
+  ) {}
 
   /**
    * lint an array of components.
@@ -32,7 +35,7 @@ export class LinterMain {
     return lintResults;
   }
 
-  getLinter(context: ExecutionContext, options: LinterOptions): Linter {
+  getLinter(context: ExecutionContext, options: LinterOptions): Linter | undefined {
     return this.linterService.getLinter(context, options);
   }
 

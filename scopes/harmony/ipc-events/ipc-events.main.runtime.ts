@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs-extra';
 import { IpcEventsAspect } from './ipc-events.aspect';
 
-type EventName = 'onPostInstall' | 'onPostObjectsPersist';
+type EventName = 'onPostInstall' | 'onPostObjectsPersist' | 'onNotifySSE';
 
 type GotEvent = (eventName: EventName) => Promise<void>;
 type GotEventSlot = SlotRegistry<GotEvent>;
@@ -30,7 +30,11 @@ const EVENTS_DIR = 'events';
  * is onPostInstall and then triggers its own OnPostInstall slot.
  */
 export class IpcEventsMain {
-  constructor(private scope: ScopeMain, private gotEventSlot: GotEventSlot, private logger: Logger) {}
+  constructor(
+    private scope: ScopeMain,
+    private gotEventSlot: GotEventSlot,
+    private logger: Logger
+  ) {}
 
   registerGotEventSlot(fn: GotEvent) {
     this.gotEventSlot.register(fn);
@@ -55,6 +59,15 @@ export class IpcEventsMain {
     await fs.outputFile(filename, content);
   }
 
+  /**
+   * This is helpful when all we want is to notify the watchers that a new event has been written to the filesystem.
+   * It doesn't require the watchers to register to GotEventSlot. The watchers always listen to this onNotifySSE event,
+   * and once they get it, they simply send a server-send-event to the clients.
+   */
+  async publishIpcOnNotifySseEvent(event: string, data?: Record<string, any>) {
+    await this.publishIpcEvent('onNotifySSE', { event, data });
+  }
+
   get eventsDir() {
     return path.join(this.scope.path, EVENTS_DIR);
   }
@@ -75,7 +88,9 @@ export class IpcEventsMain {
       });
       ipcEventsMain.registerGotEventSlot(async (eventName) => {
         if (eventName === 'onPostObjectsPersist') {
+          logger.debug('got an event onPostObjectsPersist, clearing the cache and reloading staged-snaps');
           scope.legacyScope.objects.clearObjectsFromCache();
+          scope.legacyScope.setStagedSnaps(); // "bit export" deletes the staged-snaps file, so it should be reloaded
         }
       });
     }

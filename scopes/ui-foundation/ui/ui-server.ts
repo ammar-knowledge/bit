@@ -5,7 +5,7 @@ import { Logger } from '@teambit/logger';
 import express, { Express } from 'express';
 import fallback from 'express-history-api-fallback';
 import { Port } from '@teambit/toolbox.network.get-port';
-import { stripTrailingChar } from '@teambit/legacy/dist/utils';
+import { stripTrailingChar } from '@teambit/toolbox.string.strip-trailing-char';
 import { Server } from 'http';
 import httpProxy from 'http-proxy';
 import { join } from 'path';
@@ -157,7 +157,7 @@ export class UIServer {
     // TODO - should use https://github.com/chimurai/http-proxy-middleware
     server.on('upgrade', function (req, socket, head) {
       const entry = proxyEntries.find((proxy) =>
-        proxy.context.some((item) => item === stripTrailingChar(req.url as string, '/'))
+        proxy.context.some((item) => item === stripTrailingChar(req.url?.replace(/\?.+$/, '') as string, '/'))
       );
       if (!entry) return;
       proxServer.ws(req, socket, head, {
@@ -184,7 +184,7 @@ export class UIServer {
     const expressAppPort = this._port;
 
     const config = await this.getDevConfig();
-    const compiler = webpack(config);
+    const compiler = webpack(config as any);
     const devServerConfig = await this.getDevServerConfig(devServerPort, expressAppPort, config.devServer);
     // @ts-ignore in the capsules it throws an error about compatibilities issues between webpack.compiler and webpackDevServer/webpack/compiler
     const devServer = new WebpackDevServer(devServerConfig, compiler);

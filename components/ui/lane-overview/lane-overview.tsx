@@ -1,7 +1,8 @@
 import React, { useMemo, ComponentType } from 'react';
 import { LaneModel, LanesModel, LanesHost } from '@teambit/lanes.ui.models.lanes-model';
 import { ComponentGrid } from '@teambit/explorer.ui.gallery.component-grid';
-import { RouteSlot, SlotRouter } from '@teambit/ui-foundation.ui.react-router.slot-router';
+import { SlotRouter } from '@teambit/ui-foundation.ui.react-router.slot-router';
+import type { RouteSlot } from '@teambit/ui-foundation.ui.react-router.slot-router';
 import { useLanes as defaultUseLanes } from '@teambit/lanes.hooks.use-lanes';
 import { useCloudScopes } from '@teambit/cloud.hooks.use-cloud-scopes';
 import { useLaneComponents } from '@teambit/lanes.hooks.use-lane-components';
@@ -119,9 +120,7 @@ function LaneOverviewWithPreview({ currentLane, overviewItems, routeSlot, host }
         componentCount={currentLane.components.length}
       ></LaneDetails>
       <ComponentGrid className={styles.cardGrid}>
-        {components?.map((component, index) => (
-          <ComponentCard component={component} key={index} />
-        ))}
+        {components?.map((component, index) => <ComponentCard component={component} key={index} />)}
       </ComponentGrid>
       {routeSlot && <SlotRouter slot={routeSlot} />}
       {overviewItems.length > 0 && overviewItems.map((Item, index) => <Item key={index} />)}

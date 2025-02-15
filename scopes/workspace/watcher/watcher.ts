@@ -2,19 +2,17 @@ import { PubsubMain } from '@teambit/pubsub';
 import fs from 'fs-extra';
 import { dirname, basename } from 'path';
 import { compact, difference, partition } from 'lodash';
-import { ComponentID } from '@teambit/component-id';
-import loader from '@teambit/legacy/dist/cli/loader';
-import { BIT_MAP, CFG_WATCH_USE_POLLING, WORKSPACE_JSONC } from '@teambit/legacy/dist/constants';
-import { Consumer } from '@teambit/legacy/dist/consumer';
-import logger from '@teambit/legacy/dist/logger/logger';
-import { pathNormalizeToLinux } from '@teambit/legacy/dist/utils';
+import { ComponentID, ComponentIdList } from '@teambit/component-id';
+import { BIT_MAP, WORKSPACE_JSONC } from '@teambit/legacy.constants';
+import { Consumer } from '@teambit/legacy.consumer';
+import { logger } from '@teambit/legacy.logger';
+import { pathNormalizeToLinux, PathOsBasedAbsolute } from '@teambit/legacy.utils';
 import mapSeries from 'p-map-series';
 import chalk from 'chalk';
 import { ChildProcess } from 'child_process';
-import { UNMERGED_FILENAME } from '@teambit/legacy/dist/scope/lanes/unmerged-components';
-import chokidar, { FSWatcher } from '@teambit/chokidar';
-import ComponentMap from '@teambit/legacy/dist/consumer/bit-map/component-map';
-import { PathOsBasedAbsolute } from '@teambit/legacy/dist/utils/path';
+import { UNMERGED_FILENAME } from '@teambit/legacy.scope';
+import chokidar, { FSWatcher } from 'chokidar';
+import { ComponentMap } from '@teambit/legacy.bit-map';
 import { CompilationInitiator } from '@teambit/compiler';
 import {
   WorkspaceAspect,
@@ -27,6 +25,8 @@ import {
 import { CheckTypes } from './check-types';
 import { WatcherMain } from './watcher.main.runtime';
 import { WatchQueue } from './watch-queue';
+import { Logger } from '@teambit/logger';
+import { sendEventsToClients } from '@teambit/harmony.modules.send-server-sent-events';
 
 export type WatcherProcessData = { watchProcess: ChildProcess; compilerId: ComponentID; componentIds: ComponentID[] };
 
@@ -56,7 +56,12 @@ export type WatchOptions = {
   checkTypes?: CheckTypes; // if enabled, the spawnTSServer becomes true.
   preCompile?: boolean; // whether compile all components before start watching
   compile?: boolean; // whether compile modified/added components during watch process
+  import?: boolean; // whether import objects when .bitmap got version changes
+  generateTypes?: boolean; // whether generate d.ts files for typescript files during watch process (hurts performance)
+  trigger?: ComponentID; // trigger onComponentChange for the specified component-id. helpful when this comp must be a bundle, and needs to be recompile on any dep change.
 };
+
+export type RootDirs = { [dir: PathLinux]: ComponentID };
 
 const DEBOUNCE_WAIT_MS = 100;
 type PathLinux = string; // ts fails when importing it from @teambit/legacy/dist/utils/path.
@@ -67,9 +72,10 @@ export class Watcher {
   private watchQueue = new WatchQueue();
   private bitMapChangesInProgress = false;
   private ipcEventsDir: string;
-  private trackDirs: { [dir: PathLinux]: ComponentID } = {};
+  private rootDirs: RootDirs = {};
   private verbose = false;
   private multipleWatchers: WatcherProcessData[] = [];
+  private logger: Logger;
   constructor(
     private workspace: Workspace,
     private pubsub: PubsubMain,
@@ -78,6 +84,7 @@ export class Watcher {
   ) {
     this.ipcEventsDir = this.watcherMain.ipcEvents.eventsDir;
     this.verbose = this.options.verbose || false;
+    this.logger = this.watcherMain.logger;
   }
 
   get consumer(): Consumer {
@@ -86,14 +93,14 @@ export class Watcher {
 
   async watch() {
     const { msgs, ...watchOpts } = this.options;
-    await this.setTrackDirs();
-    const componentIds = Object.values(this.trackDirs);
+    await this.setRootDirs();
+    const componentIds = Object.values(this.rootDirs);
     await this.watcherMain.triggerOnPreWatch(componentIds, watchOpts);
+    await this.watcherMain.watchScopeInternalFiles();
+
     await this.createWatcher();
     const watcher = this.fsWatcher;
     msgs?.onStart(this.workspace);
-
-    await this.workspace.scope.watchScopeInternalFiles();
 
     return new Promise((resolve, reject) => {
       if (this.verbose) {
@@ -101,9 +108,17 @@ export class Watcher {
         if (msgs?.onAll) watcher.on('all', msgs?.onAll);
       }
       watcher.on('ready', () => {
-        msgs?.onReady(this.workspace, this.trackDirs, this.verbose);
-        // console.log(this.fsWatcher.getWatched());
-        loader.stop();
+        msgs?.onReady(this.workspace, this.rootDirs, this.verbose);
+        if (this.verbose) {
+          const watched = this.fsWatcher.getWatched();
+          const totalWatched = Object.values(watched).flat().length;
+          logger.console(
+            `${chalk.bold('the following files are being watched:')}\n${JSON.stringify(watched, null, 2)}`
+          );
+          logger.console(`\nTotal files being watched: ${chalk.bold(totalWatched.toString())}`);
+        }
+
+        this.logger.clearStatusLine();
       });
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       watcher.on('all', async (event, filePath) => {
@@ -170,7 +185,7 @@ export class Watcher {
         this.bitMapChangesInProgress = true;
         const buildResults = await this.watchQueue.add(() => this.handleBitmapChanges());
         this.bitMapChangesInProgress = false;
-        loader.stop();
+        this.logger.clearStatusLine();
         return { results: buildResults, files: [filePath] };
       }
       if (this.bitMapChangesInProgress) {
@@ -178,10 +193,14 @@ export class Watcher {
       }
       if (dirname(filePath) === this.ipcEventsDir) {
         const eventName = basename(filePath);
-        if (eventName !== 'onPostInstall') {
-          this.watcherMain.logger.warn(`eventName ${eventName} is not recognized, please handle it`);
+        if (eventName === 'onNotifySSE') {
+          const content = await fs.readFile(filePath, 'utf8');
+          this.logger.debug(`Watcher, onNotifySSE ${content}`);
+          const parsed = JSON.parse(content);
+          sendEventsToClients(parsed.event, parsed);
+        } else {
+          await this.watcherMain.ipcEvents.triggerGotEvent(eventName as any);
         }
-        await this.watcherMain.ipcEvents.triggerGotEvent(eventName as 'onPostInstall');
         return { results: [], files: [filePath] };
       }
       if (filePath.endsWith(WORKSPACE_JSONC)) {
@@ -194,13 +213,13 @@ export class Watcher {
       }
       const componentId = this.getComponentIdByPath(filePath);
       if (!componentId) {
-        loader.stop();
+        this.logger.clearStatusLine();
         return { results: [], files: [], irrelevant: true };
       }
       const compIdStr = componentId.toString();
       if (this.changedFilesPerComponent[compIdStr]) {
         this.changedFilesPerComponent[compIdStr].push(filePath);
-        loader.stop();
+        this.logger.clearStatusLine();
         return { results: [], files: [], debounced: true };
       }
       this.changedFilesPerComponent[compIdStr] = [filePath];
@@ -212,13 +231,13 @@ export class Watcher {
       const failureMsg = buildResults.length
         ? undefined
         : `files ${files.join(', ')} are inside the component ${compIdStr} but configured to be ignored`;
-      loader.stop();
+      this.logger.clearStatusLine();
       return { results: buildResults, files, failureMsg };
     } catch (err: any) {
       const msg = `watcher found an error while handling ${filePath}`;
       logger.error(msg, err);
       logger.console(`${msg}, ${err.message}`);
-      loader.stop();
+      this.logger.clearStatusLine();
       return { results: [], files: [filePath], failureMsg: err.message };
     }
   }
@@ -232,7 +251,7 @@ export class Watcher {
     files: PathOsBasedAbsolute[]
   ): Promise<OnComponentEventResult[]> {
     let updatedComponentId: ComponentID | undefined = componentId;
-    if (!(await this.workspace.hasId(componentId))) {
+    if (!this.workspace.hasId(componentId)) {
       // bitmap has changed meanwhile, which triggered `handleBitmapChanges`, which re-loaded consumer and updated versions
       // so the original componentId might not be in the workspace now, and we need to find the updated one
       const ids = this.workspace.listIds();
@@ -280,6 +299,10 @@ export class Watcher {
       removedFiles,
       true
     );
+    if (this.options.trigger && !updatedComponentId.isEqual(this.options.trigger)) {
+      await this.workspace.triggerOnComponentChange(this.options.trigger, [], [], this.options);
+    }
+
     return buildResults;
   }
 
@@ -287,24 +310,64 @@ export class Watcher {
    * if .bitmap changed, it's possible that a new component has been added. trigger onComponentAdd.
    */
   private async handleBitmapChanges(): Promise<OnComponentEventResult[]> {
-    const previewsTrackDirs = { ...this.trackDirs };
+    const previewsRootDirs = { ...this.rootDirs };
+    const previewsIds = this.consumer.bitMap.getAllBitIds();
     await this.workspace._reloadConsumer();
-    await this.setTrackDirs();
+    await this.setRootDirs();
+    await this.importObjectsIfNeeded(previewsIds);
     await this.workspace.triggerOnBitmapChange();
-    const newDirs: string[] = difference(Object.keys(this.trackDirs), Object.keys(previewsTrackDirs));
-    const removedDirs: string[] = difference(Object.keys(previewsTrackDirs), Object.keys(this.trackDirs));
+    const newDirs: string[] = difference(Object.keys(this.rootDirs), Object.keys(previewsRootDirs));
+    const removedDirs: string[] = difference(Object.keys(previewsRootDirs), Object.keys(this.rootDirs));
     const results: OnComponentEventResult[] = [];
     if (newDirs.length) {
       const addResults = await mapSeries(newDirs, async (dir) =>
-        this.executeWatchOperationsOnComponent(this.trackDirs[dir], [], [], false)
+        this.executeWatchOperationsOnComponent(this.rootDirs[dir], [], [], false)
       );
       results.push(...addResults.flat());
     }
     if (removedDirs.length) {
-      await mapSeries(removedDirs, (dir) => this.executeWatchOperationsOnRemove(previewsTrackDirs[dir]));
+      await mapSeries(removedDirs, (dir) => this.executeWatchOperationsOnRemove(previewsRootDirs[dir]));
     }
 
     return results;
+  }
+
+  /**
+   * needed when using git.
+   * it resolves the following issue - a user is running `git pull` which updates the components and the .bitmap file.
+   * because the objects locally are not updated, the .bitmap has new versions that don't exist in the local scope.
+   * as soon as the watcher gets an event about a file change, it loads the component which throws
+   * ComponentsPendingImport error.
+   * to resolve this, we import the new objects as soon as the .bitmap file changes.
+   * for performance reasons, we import only when: 1) the .bitmap file has version changes and 2) this new version is
+   * not already in the scope.
+   */
+  private async importObjectsIfNeeded(previewsIds: ComponentIdList) {
+    if (!this.options.import) {
+      return;
+    }
+    const currentIds = this.consumer.bitMap.getAllBitIds();
+    const hasVersionChanges = currentIds.find((id) => {
+      const prevId = previewsIds.searchWithoutVersion(id);
+      return prevId && prevId.version !== id.version;
+    });
+    if (!hasVersionChanges) {
+      return;
+    }
+    const existsInScope = await this.workspace.scope.isComponentInScope(hasVersionChanges);
+    if (existsInScope) {
+      // the .bitmap change was probably a result of tag/snap/merge, no need to import.
+      return;
+    }
+    if (this.options.verbose) {
+      logger.console(
+        `Watcher: .bitmap has changed with new versions which do not exist locally, importing the objects...`
+      );
+    }
+    await this.workspace.scope.import(currentIds, {
+      useCache: true,
+      lane: await this.workspace.getCurrentLaneObject(),
+    });
   }
 
   private async executeWatchOperationsOnRemove(componentId: ComponentID) {
@@ -364,64 +427,51 @@ export class Watcher {
 
   private getComponentIdByPath(filePath: string): ComponentID | null {
     const relativeFile = this.getRelativePathLinux(filePath);
-    const trackDir = this.findTrackDirByFilePathRecursively(relativeFile);
-    if (!trackDir) {
+    const rootDir = this.findRootDirByFilePathRecursively(relativeFile);
+    if (!rootDir) {
       // the file is not part of any component. If it was a new component, or a new file of
       // existing component, then, handleBitmapChanges() should deal with it.
       return null;
     }
-    return this.trackDirs[trackDir];
+    return this.rootDirs[rootDir];
   }
 
   private getRelativePathLinux(filePath: string) {
     return pathNormalizeToLinux(this.consumer.getPathRelativeToConsumer(filePath));
   }
 
-  private findTrackDirByFilePathRecursively(filePath: string): string | null {
-    if (this.trackDirs[filePath]) return filePath;
+  private findRootDirByFilePathRecursively(filePath: string): string | null {
+    if (this.rootDirs[filePath]) return filePath;
     const parentDir = dirname(filePath);
     if (parentDir === filePath) return null;
-    return this.findTrackDirByFilePathRecursively(parentDir);
+    return this.findRootDirByFilePathRecursively(parentDir);
   }
 
   private async createWatcher() {
-    const usePollingConf = await this.watcherMain.globalConfig.get(CFG_WATCH_USE_POLLING);
-    const usePolling = usePollingConf === 'true';
-    // const useFsEventsConf = await this.watcherMain.globalConfig.get(CFG_WATCH_USE_FS_EVENTS);
-    // const useFsEvents = useFsEventsConf === 'true';
+    const workspacePathLinux = pathNormalizeToLinux(this.workspace.path);
     const ignoreLocalScope = (pathToCheck: string) => {
       if (pathToCheck.startsWith(this.ipcEventsDir) || pathToCheck.endsWith(UNMERGED_FILENAME)) return false;
       return (
-        pathToCheck.startsWith(`${this.workspace.path}/.git/`) || pathToCheck.startsWith(`${this.workspace.path}/.bit/`)
+        pathToCheck.startsWith(`${workspacePathLinux}/.git/`) || pathToCheck.startsWith(`${workspacePathLinux}/.bit/`)
       );
     };
-    this.fsWatcher = chokidar.watch(this.workspace.path, {
-      ignoreInitial: true,
-      // `chokidar` matchers have Bash-parity, so Windows-style backslashes are not supported as separators.
-      // (windows-style backslashes are converted to forward slashes)
-      ignored: ['**/node_modules/**', '**/package.json', ignoreLocalScope],
-      /**
-       * default to false, although it causes high CPU usage.
-       * see: https://github.com/paulmillr/chokidar/issues/1196#issuecomment-1711033539
-       * there is a fix for this in master. once a new version of Chokidar is released, we can upgrade it and then
-       * default to true.
-       */
-      usePolling,
-      // useFsEvents,
-      persistent: true,
-    });
+    const chokidarOpts = await this.watcherMain.getChokidarWatchOptions();
+    // `chokidar` matchers have Bash-parity, so Windows-style backslashes are not supported as separators.
+    // (windows-style backslashes are converted to forward slashes)
+    chokidarOpts.ignored = ['**/node_modules/**', '**/package.json', ignoreLocalScope];
+    this.fsWatcher = chokidar.watch(this.workspace.path, chokidarOpts);
     if (this.verbose) {
-      logger.console(`chokidar.options ${JSON.stringify(this.fsWatcher.options, undefined, 2)}`);
+      logger.console(`${chalk.bold('chokidar.options:\n')} ${JSON.stringify(this.fsWatcher.options, undefined, 2)}`);
     }
   }
 
-  private async setTrackDirs() {
-    this.trackDirs = {};
+  private async setRootDirs() {
+    this.rootDirs = {};
     const componentsFromBitMap = this.consumer.bitMap.getAllComponents();
     componentsFromBitMap.map((componentMap) => {
       const componentId = componentMap.id;
       const rootDir = componentMap.getRootDir();
-      this.trackDirs[rootDir] = componentId;
+      this.rootDirs[rootDir] = componentId;
     });
   }
 }

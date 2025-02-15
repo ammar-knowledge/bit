@@ -4,14 +4,10 @@ import fs from 'fs-extra';
 import * as path from 'path';
 import { OutsideWorkspaceError } from '@teambit/workspace';
 import { InvalidName } from '@teambit/legacy-bit-id';
-import { statusInvalidComponentsMsg } from '../../src/constants';
-import { MissingMainFile } from '../../src/consumer/bit-map/exceptions';
-import {
-  MainFileIsDir,
-  PathOutsideConsumer,
-  VersionShouldBeRemoved,
-} from '../../src/consumer/component-ops/add-components/exceptions';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { statusInvalidComponentsMsg } from '@teambit/legacy.constants';
+import { MainFileIsDir, PathOutsideConsumer, VersionShouldBeRemoved } from '@teambit/tracker';
+import { MissingMainFile } from '@teambit/legacy.bit-map';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -32,7 +28,7 @@ describe('bit add command', function () {
   describe('add before running "bit init"', () => {
     it('Should return message to run "bit init"', () => {
       helper.fixtures.createComponentBarFoo();
-      const cmd = () => helper.fixtures.addComponentBarFooAsDir();
+      const cmd = () => helper.fixtures.addComponentBarFoo();
       const error = new OutsideWorkspaceError();
       helper.general.expectToThrow(cmd, error);
     });
@@ -46,7 +42,7 @@ describe('bit add command', function () {
       // @ts-ignore AUTO-ADDED-AFTER-MIGRATION-PLEASE-FIX!
       helper.scopeHelper.initWorkspace();
       helper.fixtures.createComponentBarFoo();
-      const addCmd = () => helper.fixtures.addComponentBarFooAsDir();
+      const addCmd = () => helper.fixtures.addComponentBarFoo();
       expect(addCmd).to.not.throw();
     });
   });
@@ -57,12 +53,12 @@ describe('bit add command', function () {
     });
     it('Should print tracking component: id', () => {
       helper.fixtures.createComponentBarFoo();
-      output = helper.fixtures.addComponentBarFooAsDir();
+      output = helper.fixtures.addComponentBarFoo();
       expect(output).to.contain('bar/foo');
     });
     it('Should print warning when trying to add file that is already tracked with different id and not add it as a new one', () => {
       helper.fixtures.createComponentBarFoo();
-      helper.fixtures.addComponentBarFooAsDir();
+      helper.fixtures.addComponentBarFoo();
       output = helper.command.addComponent('bar -i bar/new');
       expect(output).to.have.string(
         `warning: files bar/foo.js already used by component: ${helper.scopes.remote}/bar/foo`

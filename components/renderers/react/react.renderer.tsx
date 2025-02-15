@@ -5,7 +5,9 @@ import { APINodeDetails } from '@teambit/api-reference.renderers.api-node-detail
 import { parameterRenderer as defaultParamRenderer } from '@teambit/api-reference.renderers.parameter';
 import classnames from 'classnames';
 import { TagName } from '@teambit/semantics.entities.semantic-schema';
-import { Link } from '@teambit/base-react.navigation.link';
+import { Link as BaseLink } from '@teambit/base-react.navigation.link';
+// @todo - this will be fixed as part of the @teambit/base-react.navigation.link upgrade to latest
+const Link = BaseLink as any;
 
 import styles from './react.renderer.module.scss';
 
@@ -38,8 +40,8 @@ function ReactComponent(props: APINodeRenderProps) {
   const PropsRefComponent =
     paramRef && paramRefRenderer?.Component ? (
       <paramRefRenderer.Component
-        {...props}
         key={`props-ref-${reactProps.name}`}
+        {...props}
         depth={(props.depth ?? 0) + 1}
         apiNode={{ ...props.apiNode, renderer: paramRefRenderer, api: paramRef }}
         metadata={{ [paramRef.__schema]: { columnView: true } }}
@@ -49,8 +51,8 @@ function ReactComponent(props: APINodeRenderProps) {
   const ParamComponent =
     reactProps && paramRenderer?.Component ? (
       <paramRenderer.Component
-        {...props}
         key={`props-${reactProps.name}`}
+        {...props}
         depth={(props.depth ?? 0) + 1}
         apiNode={{ ...props.apiNode, renderer: paramRenderer, api: reactProps }}
         metadata={{ [reactProps.__schema]: { columnView: true } }}
@@ -58,8 +60,8 @@ function ReactComponent(props: APINodeRenderProps) {
     ) : (
       (reactProps && (
         <defaultParamRenderer.Component
-          {...props}
           key={`props-${reactProps.name}`}
+          {...props}
           depth={(props.depth ?? 0) + 1}
           apiNode={{ ...props.apiNode, renderer: defaultParamRenderer, api: reactProps }}
           metadata={{ [reactProps.__schema]: { columnView: true } }}
@@ -126,8 +128,8 @@ function ReactOverviewComponent(props: APINodeRenderProps) {
   const PropsRefComponent =
     paramRef && paramRefRenderer?.Component ? (
       <paramRefRenderer.Component
-        {...props}
         key={`props-ref-${reactProps.name}`}
+        {...props}
         depth={(props.depth ?? 0) + 1}
         apiNode={{ ...props.apiNode, renderer: paramRefRenderer, api: paramRef }}
         metadata={{ [paramRef.__schema]: { columnView: true } }}
@@ -137,8 +139,8 @@ function ReactOverviewComponent(props: APINodeRenderProps) {
   const ParamComponent =
     reactProps && paramRenderer?.Component ? (
       <paramRenderer.Component
-        {...props}
         key={`props-${reactProps.name}`}
+        {...props}
         depth={(props.depth ?? 0) + 1}
         apiNode={{ ...props.apiNode, renderer: paramRenderer, api: reactProps }}
         metadata={{ [reactProps.__schema]: { columnView: true } }}
@@ -146,8 +148,8 @@ function ReactOverviewComponent(props: APINodeRenderProps) {
     ) : (
       (reactProps && (
         <defaultParamRenderer.Component
-          {...props}
           key={`props-${reactProps.name}`}
+          {...props}
           depth={(props.depth ?? 0) + 1}
           apiNode={{ ...props.apiNode, renderer: defaultParamRenderer, api: reactProps }}
           metadata={{ [reactProps.__schema]: { columnView: true } }}
@@ -160,7 +162,8 @@ function ReactOverviewComponent(props: APINodeRenderProps) {
   const icon = reactRenderer.icon;
   const description =
     api.doc?.comment ??
-    api?.doc?.tags?.filter((tag) => tag.comment).reduce((acc, tag) => acc.concat(`${tag.comment}\n` ?? ''), '');
+    api?.doc?.tags?.filter((tag) => tag.comment).reduce((acc, tag) => acc.concat(`${tag.comment}\n`), '');
+
   return (
     <div className={styles.reactOverview}>
       <div className={styles.reactOverviewHeader}>

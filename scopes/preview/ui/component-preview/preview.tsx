@@ -1,9 +1,11 @@
+/* eslint-disable complexity */
 import React, { IframeHTMLAttributes, useState, useRef, useEffect } from 'react';
 import classNames from 'classnames';
 import { compact } from 'lodash';
 import { connectToChild } from 'penpal';
 import { usePubSubIframe } from '@teambit/pubsub';
 import { ComponentModel } from '@teambit/component';
+import { LOAD_EVENT } from '@teambit/ui-foundation.ui.rendering.html';
 import { toPreviewUrl } from './urls';
 import { computePreviewScale } from './compute-preview-scale';
 import { useIframeContentHeight } from './use-iframe-content-height';
@@ -94,6 +96,7 @@ export function ComponentPreview({
   fullContentHeight = false,
   onLoad,
   style,
+  sandbox,
   ...rest
 }: ComponentPreviewProps) {
   const [heightIframeRef, iframeHeight] = useIframeContentHeight({ skip: false, viewport });
@@ -108,6 +111,19 @@ export function ComponentPreview({
   usePubSubIframe(pubsub ? currentRef : undefined);
   // const pubsubContext = usePubSub();
   // pubsubContext?.connect(iframeHeight);
+
+  useEffect(() => {
+    const handleLoad = (event) => {
+      if (event.data && (event.data.event === LOAD_EVENT || event.data.event === 'webpackInvalid')) {
+        onLoad && onLoad(event);
+      }
+    };
+    window.addEventListener('message', handleLoad);
+    return () => {
+      window.removeEventListener('message', handleLoad);
+    };
+  }, []);
+
   useEffect(() => {
     if (!iframeRef.current) return;
     connectToChild({
@@ -115,7 +131,10 @@ export function ComponentPreview({
       methods: {
         pub: (event, message) => {
           if (message.type === 'preview-size') {
+            // disable this for now until we figure out how to correctly calculate the height
+            // const previewHeight = component.preview?.onlyOverview ? message.data.height - 150 : message.data.height;
             setWidth(message.data.width);
+            // setHeight(previewHeight);
             setHeight(message.data.height);
           }
           onLoad && event && onLoad(event, { height: message.data.height, width: message.data.width });
@@ -145,6 +164,7 @@ export function ComponentPreview({
     <div ref={containerRef} className={classNames(styles.preview, className)} style={{ height: forceHeight }}>
       <iframe
         {...rest}
+        sandbox={sandbox || undefined}
         ref={currentRef}
         style={{
           ...style,

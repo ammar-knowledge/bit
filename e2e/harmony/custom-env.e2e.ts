@@ -3,9 +3,8 @@ import path from 'path';
 import chai, { expect } from 'chai';
 import { resolveFrom } from '@teambit/toolbox.modules.module-resolver';
 import { IssuesClasses } from '@teambit/component-issues';
-import { Extensions, IS_WINDOWS } from '../../src/constants';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import NpmCiRegistry, { supportNpmCiRegistryTesting } from '../npm-ci-registry';
+import { Extensions, IS_WINDOWS } from '@teambit/legacy.constants';
+import { Helper, NpmCiRegistry, supportNpmCiRegistryTesting } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 chai.use(require('chai-string'));
@@ -224,8 +223,8 @@ describe('custom env', function () {
   });
 
   (supportNpmCiRegistryTesting ? describe : describe.skip)('custom env installed as a package', () => {
-    let envId;
-    let envName;
+    let envId: string;
+    let envName: string;
     let npmCiRegistry: NpmCiRegistry;
     before(async () => {
       helper = new Helper({ scopesOptions: { remoteScopeWithDot: true } });
@@ -330,6 +329,23 @@ describe('custom env', function () {
         expect(bitMap.comp1.config[Extensions.envs].env).equal(envId);
       });
     });
+    describe('set up the same env with two different versions, then replace with another env', () => {
+      before(() => {
+        helper.scopeHelper.reInitLocalScope();
+        helper.scopeHelper.addRemoteScope();
+        helper.fixtures.populateComponents(2);
+        helper.command.setEnv('comp1', `${envId}@0.0.1`);
+        helper.command.setEnv('comp2', `${envId}@0.0.2`);
+        helper.command.replaceEnv(envId, `teambit.react/react`);
+      });
+      it('should replace the env for both components', () => {
+        const bitMap = helper.bitMap.read();
+        expect(bitMap.comp1.config).to.not.have.property(`${envId}@0.0.1`);
+        expect(bitMap.comp2.config).to.not.have.property(`${envId}@0.0.2`);
+        expect(bitMap.comp1.config).to.have.property('teambit.react/react');
+        expect(bitMap.comp2.config).to.have.property('teambit.react/react');
+      });
+    });
     describe('tag and change the env version', () => {
       before(() => {
         helper.scopeHelper.reInitLocalScope({ addRemoteScopeAsDefaultScope: false });
@@ -344,7 +360,27 @@ describe('custom env', function () {
         expect(isModified).to.be.true;
       });
     });
+    describe('snapping the env on the lane and then deleting it', () => {
+      before(() => {
+        helper.scopeHelper.reInitLocalScope();
+        helper.scopeHelper.addRemoteScope();
+        helper.fixtures.populateComponents(1);
+        helper.command.createLane();
+        helper.command.importComponent(envName);
+        helper.command.setEnv('comp1', envId);
+        helper.command.snapAllComponentsWithoutBuild('--unmodified');
+        helper.command.export();
 
+        helper.command.softRemoveOnLane(envId);
+      });
+      it('bit status should show the RemovedEnv issue', () => {
+        helper.command.expectStatusToHaveIssue(IssuesClasses.RemovedEnv.name);
+      });
+      it('replacing the env should fix the issue', () => {
+        helper.command.replaceEnv(envId, `${envId}@0.0.2`);
+        helper.command.expectStatusToNotHaveIssue(IssuesClasses.RemovedEnv.name);
+      });
+    });
     describe('missing modules in the env capsule', () => {
       before(() => {
         helper.scopeHelper.reInitLocalScope();
@@ -492,6 +528,110 @@ describe('custom env', function () {
     });
     it('should not enter into an infinite loop on any command', () => {
       helper.command.status();
+    });
+  });
+  describe('ejecting conf when current env exists locally', () => {
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.env.setCustomEnv();
+      helper.fixtures.populateComponents(1, false);
+      helper.command.setEnv('comp1', 'node-env');
+      helper.command.tagAllWithoutBuild();
+      helper.command.export();
+      helper.command.ejectConf('comp1');
+    });
+    it('should write the env aspect without a version to the component.json file', () => {
+      const compJson = helper.componentJson.read('comp1');
+      expect(compJson.extensions).to.have.property(`${helper.scopes.remote}/node-env`);
+      expect(compJson.extensions).to.not.have.property(`${helper.scopes.remote}/node-env@0.0.1`);
+    });
+  });
+  describe('an empty env. nothing is configured, not even a compiler', () => {
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.fs.outputFile(
+        'empty-env/empty-env.bit-env.ts',
+        `export class EmptyEnv {}
+export default new EmptyEnv();
+`
+      );
+      helper.fs.outputFile('empty-env/index.ts', `export { EmptyEnv } from './empty-env.bit-env';`);
+      helper.command.addComponent('empty-env');
+      helper.command.setEnv('empty-env', 'teambit.envs/env');
+
+      helper.fixtures.populateComponents(1, false);
+      helper.command.setEnv('comp1', 'empty-env');
+
+      fs.removeSync(path.join(helper.scopes.localPath, 'node_modules'));
+      helper.command.install();
+    });
+    it('bit compile should not compile the component', () => {
+      const output = helper.command.compile();
+      expect(output).to.not.have.string('comp1');
+    });
+    it('should not create dist dir in the node_modules', () => {
+      const dir = path.join(helper.scopes.localPath, 'node_modules', helper.scopes.remote, 'comp1/dist');
+      expect(dir).to.not.be.a.path();
+    });
+    it('bit build should not fail', () => {
+      const output = helper.command.build();
+      expect(output).to.have.string('build succeeded');
+    });
+    it('bit format should not show an error', () => {
+      const output = helper.command.format();
+      expect(output).to.not.have.string('failed');
+    });
+    it('bit lint should not show an error', () => {
+      const output = helper.command.lint();
+      expect(output).to.not.have.string('failed');
+    });
+    it('bit test should not show an error', () => {
+      const output = helper.command.test();
+      expect(output).to.not.have.string('failed');
+    });
+  });
+  describe('custom env with invalid env.jsonc', () => {
+    before(() => {
+      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.workspaceJsonc.setPackageManager();
+      const envName = helper.env.setCustomEnv();
+      const envId = `${helper.scopes.remote}/${envName}`;
+      helper.fixtures.populateComponents(1);
+      helper.command.setEnv('comp1', envId);
+    });
+    it('should throw a descriptive error when a policy entry is not an object', () => {
+      helper.fs.outputFile(
+        'node-env/env.jsonc',
+        `{
+  "policy": {
+    "dev": [
+      "lodash"
+    ]
+  }
+}`
+      );
+      const output = helper.general.runWithTryCatch('bit status');
+      expect(output).to.have.string(
+        'error: failed validating the env.jsonc file. policy.dev entry must be an object, got type "string" value: "lodash"'
+      );
+    });
+    it('should throw a descriptive error when a policy entry object has no "version" field', () => {
+      helper.fs.outputFile(
+        'node-env/env.jsonc',
+        `{
+  "policy": {
+    "dev": [
+      {
+        "name": "lodash"
+      }
+    ]
+  }
+}`
+      );
+      const output = helper.general.runWithTryCatch('bit status');
+      expect(output).to.have.string(
+        'error: failed validating the env.jsonc file. policy.dev entry must have a "version" property'
+      );
     });
   });
 });

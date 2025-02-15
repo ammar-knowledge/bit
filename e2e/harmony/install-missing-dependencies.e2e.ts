@@ -1,7 +1,7 @@
 import chai, { expect } from 'chai';
 import rimraf from 'rimraf';
 import path from 'path';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 chai.use(require('chai-fs'));
 
@@ -14,7 +14,7 @@ describe('install missing dependencies', function () {
     helper.fixtures.createComponentBarFoo(
       'const isPositive = require("is-positive");const compiler = require("@teambit/compiler")'
     );
-    helper.fixtures.addComponentBarFooAsDir();
+    helper.fixtures.addComponentBarFoo();
     helper.command.install('--add-missing-deps');
     helper.command.tagAllWithoutBuild();
     helper.command.export();
