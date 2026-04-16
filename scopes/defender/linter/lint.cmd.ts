@@ -1,14 +1,16 @@
-import { TimerResponse, Timer } from '@teambit/legacy/dist/toolbox/timer';
-import { COMPONENT_PATTERN_HELP } from '@teambit/legacy/dist/constants';
-import { Command, CommandOptions } from '@teambit/cli';
-import { ComponentFactory, ComponentID } from '@teambit/component';
+import type { TimerResponse } from '@teambit/toolbox.time.timer';
+import { Timer } from '@teambit/toolbox.time.timer';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatTitle, formatSuccessSummary, joinSections } from '@teambit/cli';
+import type { ComponentFactory, ComponentID } from '@teambit/component';
 import chalk from 'chalk';
-import { EnvsExecutionResult } from '@teambit/envs';
-import { Workspace } from '@teambit/workspace';
-import { compact, flatten, omit } from 'lodash';
-import { LinterMain } from './linter.main.runtime';
-import { ComponentLintResult, LintResults } from './linter';
-import { FixTypes, LinterOptions } from './linter-context';
+import type { EnvsExecutionResult } from '@teambit/envs';
+import type { Workspace } from '@teambit/workspace';
+import { compact, flatten, groupBy, omit } from 'lodash';
+import type { LinterMain } from './linter.main.runtime';
+import type { ComponentLintResult, LintResults } from './linter';
+import type { FixTypes, LinterOptions } from './linter-context';
 
 export type LintCmdOptions = {
   changed?: boolean;
@@ -41,10 +43,13 @@ export type JsonLintResults = {
 
 export class LintCmd implements Command {
   name = 'lint [component-pattern]';
-  description = 'lint components in the development workspace';
+  description = 'analyze component code for issues and style violations';
+  extendedDescription = `runs linters configured by each component's environment (ESLint, etc.) to check for code quality issues.
+by default lints all components. use --changed to lint only new and modified components.
+supports automatic fixing of certain issues with --fix flag.`;
   arguments = [{ name: 'component-pattern', description: COMPONENT_PATTERN_HELP }];
   helpUrl = 'reference/linting/linter-overview';
-  group = 'development';
+  group = 'testing';
   options = [
     ['c', 'changed', 'lint only new and modified components'],
     ['f', 'fix', 'automatically fix problems'],
@@ -52,18 +57,29 @@ export class LintCmd implements Command {
     ['j', 'json', 'return the lint results in json format'],
   ] as CommandOptions;
 
-  constructor(private linter: LinterMain, private componentHost: ComponentFactory, private workspace: Workspace) {}
+  constructor(
+    private linter: LinterMain,
+    private componentHost: ComponentFactory,
+    private workspace: Workspace
+  ) {}
 
   async report([pattern]: [string], linterOptions: LintCmdOptions) {
     const { code, data } = await this.json([pattern], linterOptions);
     const { lintResults, componentsIdsToLint } = data;
-    const title = chalk.bold(
-      `linting total of ${chalk.cyan(componentsIdsToLint.length.toString())} component(s) in workspace '${chalk.cyan(
-        this.componentHost.name
-      )}'`
+    const title = formatTitle(
+      `linting total of ${componentsIdsToLint.length} component(s) in workspace '${this.componentHost.name}'`
     );
 
-    const componentsOutputs = lintResults.results
+    const groupedByIsClean = groupBy(lintResults.results, (res) => {
+      if (res.isClean !== undefined) {
+        return res.isClean;
+      }
+      // The is clean field was added in a later version of the linter, so if it's not there, we will calculate it
+      // based on the errors/warnings count
+      return res.totalErrorCount + (res.totalFatalErrorCount || 0) + res.totalWarningCount === 0;
+    });
+
+    const dirtyComponentsOutputs = (groupedByIsClean.false || [])
       .map((lintRes) => {
         const compTitle = chalk.bold.cyan(lintRes.componentId.toString({ ignoreVersion: true }));
         const compOutput = lintRes.output;
@@ -71,16 +87,20 @@ export class LintCmd implements Command {
       })
       .join('\n');
 
+    const cleanComponentsCount = groupedByIsClean.true?.length || 0;
+    const cleanComponentsOutput = cleanComponentsCount
+      ? formatSuccessSummary(`${cleanComponentsCount} component(s) have no linting issues`)
+      : '';
+
     const summary = this.getSummarySection(data);
-    return { code, data: `${title}\n\n${componentsOutputs}\n\n${summary}` };
+    const finalOutput = joinSections([title, dirtyComponentsOutputs, cleanComponentsOutput, summary]);
+    return { code, data: finalOutput };
   }
 
   private getSummarySection(data: JsonLintResultsData) {
     const { duration, lintResults, componentsIdsToLint } = data;
     const { seconds } = duration;
-    const summaryTitle = `linted ${chalk.cyan(componentsIdsToLint.length.toString())} components in ${chalk.cyan(
-      seconds.toString()
-    )} seconds`;
+    const summaryTitle = `linted ${componentsIdsToLint.length} components in ${seconds} seconds`;
 
     const totalFieldsMap = [
       { itemsDataField: 'totalErrorCount', componentsDataField: 'totalComponentsWithErrorCount', label: 'Errors' },
@@ -118,9 +138,7 @@ export class LintCmd implements Command {
 
   private renderTotalLine(componentsCount: number, itemsCount: number, fieldLabel: string): string | undefined {
     if (itemsCount === 0) return undefined;
-    return `total of ${chalk.green(itemsCount.toString())} ${chalk.cyan(fieldLabel)} (from ${chalk.green(
-      componentsCount.toString()
-    )} components)`;
+    return `total of ${itemsCount} ${fieldLabel} (from ${componentsCount} components)`;
   }
 
   async json([pattern]: [string], linterOptions: LintCmdOptions): Promise<JsonLintResults> {
@@ -202,6 +220,12 @@ function toJsonLintResults(results: EnvsExecutionResult<LintResults>): JsonLintD
 
     return compact(resultsWithoutComponent);
   });
+
+  const isClean =
+    totalComponentsWithErrorCount === 0 &&
+    totalComponentsWithWarningCount === 0 &&
+    totalComponentsWithFatalErrorCount === 0;
+
   return {
     results: compact(flatten(newResults)),
     totalErrorCount,
@@ -214,6 +238,7 @@ function toJsonLintResults(results: EnvsExecutionResult<LintResults>): JsonLintD
     totalComponentsWithFixableErrorCount,
     totalComponentsWithFixableWarningCount,
     totalComponentsWithWarningCount,
+    isClean,
     errors: results?.errors,
   };
 }

@@ -1,0 +1,961 @@
+import type { RuntimeDefinition } from '@teambit/harmony';
+import { CLIAspect, type CLIMain, MainRuntime } from '@teambit/cli';
+import { LoggerAspect, type LoggerMain, type Logger } from '@teambit/logger';
+import { WorkspaceAspect, type Workspace } from '@teambit/workspace';
+import { BuilderAspect, type BuilderMain } from '@teambit/builder';
+import { StatusAspect, type StatusMain } from '@teambit/status';
+import { LanesAspect } from '@teambit/lanes';
+import type { SwitchLaneOptions, LanesMain } from '@teambit/lanes';
+import { SnappingAspect, tagResultOutput, snapResultOutput } from '@teambit/snapping';
+import type { SnapResults, SnappingMain } from '@teambit/snapping';
+import { ExportAspect, type ExportMain } from '@teambit/export';
+import { ImporterAspect, type ImporterMain } from '@teambit/importer';
+import { CheckoutAspect, checkoutOutput, type CheckoutMain } from '@teambit/checkout';
+import type { MergeStrategy } from '@teambit/component.modules.merge-helper';
+import execa from 'execa';
+import chalk from 'chalk';
+import type { ReleaseType } from 'semver';
+import { CiAspect } from './ci.aspect';
+import { CiCmd } from './ci.cmd';
+import { CiVerifyCmd } from './commands/verify.cmd';
+import { CiPrCmd } from './commands/pr.cmd';
+import { CiMergeCmd } from './commands/merge.cmd';
+import { git } from './git';
+import { ComponentIdList } from '@teambit/component-id';
+import { isEqual } from 'lodash';
+import type { Version, LaneComponent } from '@teambit/objects';
+import { SourceBranchDetector } from './source-branch-detector';
+import { generateRandomStr } from '@teambit/toolbox.string.random';
+
+/**
+ * Sentinel substring emitted by the hub when a lane push is rejected because a lane with the same
+ * id already exists with a different hash. Thrown as `BitError` from
+ * `components/legacy/scope/repositories/sources.ts` and wrapped in `UnexpectedNetworkError` across
+ * the wire, so we match on the message text rather than an error class.
+ */
+const LANE_HASH_MISMATCH_MARKER = 'a lane with the same id already exists with a different hash';
+
+export interface CiWorkspaceConfig {
+  /**
+   * Path to a custom script that generates commit messages for `bit ci merge` operations.
+   * The script will be executed when components are tagged and committed to the repository.
+   * If not specified, falls back to the default commit message:
+   * "chore: update .bitmap and lockfiles as needed [skip ci]"
+   *
+   * @example
+   * ```json
+   * {
+   *   "teambit.git/ci": {
+   *     "commitMessageScript": "node scripts/generate-commit-message.js"
+   *   }
+   * }
+   * ```
+   */
+  commitMessageScript?: string;
+
+  /**
+   * Enables automatic version bump detection from conventional commit messages.
+   * When enabled, the system analyzes commit messages to determine the appropriate version bump:
+   * - `feat!:` or `BREAKING CHANGE` → major version bump
+   * - `feat:` → minor version bump
+   * - `fix:` → patch version bump
+   *
+   * Only applies when no explicit version flags (--patch, --minor, --major) are provided.
+   *
+   * @default false
+   * @example
+   * ```json
+   * {
+   *   "teambit.git/ci": {
+   *     "useConventionalCommitsForVersionBump": true
+   *   }
+   * }
+   * ```
+   */
+  useConventionalCommitsForVersionBump?: boolean;
+
+  /**
+   * Enables detection of explicit version bump keywords in commit messages.
+   * When enabled, the system looks for these keywords in commit messages:
+   * - `BIT-BUMP-MAJOR` → major version bump
+   * - `BIT-BUMP-MINOR` → minor version bump
+   *
+   * These keywords have higher priority than conventional commits parsing.
+   * Only applies when no explicit version flags are provided.
+   *
+   * @default true
+   * @example
+   * ```json
+   * {
+   *   "teambit.git/ci": {
+   *     "useExplicitBumpKeywords": true
+   *   }
+   * }
+   * ```
+   */
+  useExplicitBumpKeywords?: boolean;
+}
+
+export class CiMain {
+  static runtime = MainRuntime as RuntimeDefinition;
+
+  static dependencies: any = [
+    CLIAspect,
+    WorkspaceAspect,
+    LoggerAspect,
+    BuilderAspect,
+    StatusAspect,
+    LanesAspect,
+    SnappingAspect,
+    ExportAspect,
+    ImporterAspect,
+    CheckoutAspect,
+  ];
+
+  static slots: any = [];
+
+  constructor(
+    private workspace: Workspace,
+
+    private builder: BuilderMain,
+
+    private status: StatusMain,
+
+    private lanes: LanesMain,
+
+    private snapping: SnappingMain,
+
+    private exporter: ExportMain,
+
+    private importer: ImporterMain,
+
+    private checkout: CheckoutMain,
+
+    private logger: Logger,
+
+    private config: CiWorkspaceConfig
+  ) {}
+
+  static async provider(
+    [cli, workspace, loggerAspect, builder, status, lanes, snapping, exporter, importer, checkout]: [
+      CLIMain,
+      Workspace,
+      LoggerMain,
+      BuilderMain,
+      StatusMain,
+      LanesMain,
+      SnappingMain,
+      ExportMain,
+      ImporterMain,
+      CheckoutMain,
+    ],
+    config: CiWorkspaceConfig
+  ) {
+    const logger = loggerAspect.createLogger(CiAspect.id);
+    const ci = new CiMain(workspace, builder, status, lanes, snapping, exporter, importer, checkout, logger, config);
+    const ciCmd = new CiCmd(workspace, logger);
+    ciCmd.commands = [
+      new CiVerifyCmd(workspace, logger, ci),
+      new CiPrCmd(workspace, logger, ci),
+      new CiMergeCmd(workspace, logger, ci),
+    ];
+    cli.register(ciCmd);
+
+    return ci;
+  }
+
+  async getBranchName() {
+    try {
+      // if we are running on github, use the GITHUB_HEAD_REF env var
+      if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF;
+
+      const branch = await git.branch();
+      return branch.current;
+    } catch (e: any) {
+      throw new Error(`Unable to read branch: ${e.toString()}`);
+    }
+  }
+
+  /**
+   * Converts a branch name to a lane ID string using Bit's naming conventions.
+   * Sanitizes branch name by replacing slashes and dots with dashes, converting to lowercase, then
+   * prefixes with the workspace's default scope.
+   *
+   * @param branchName - The git branch name to convert
+   * @returns Lane ID in format: {defaultScope}/{sanitizedBranch}
+   * @example convertBranchToLaneId("feature/New-Component") => "my-scope/feature-new-component"
+   */
+  convertBranchToLaneId(branchName: string): string {
+    // Sanitize branch name to make it valid for Bit lane IDs by replacing slashes and dots with dashes
+    // and converting to lowercase
+    const sanitizedBranch = branchName.replace(/[/.]/g, '-').toLowerCase();
+    return `${this.workspace.defaultScope}/${sanitizedBranch}`;
+  }
+
+  async getDefaultBranchName() {
+    try {
+      // Try to get the default branch from git symbolic-ref
+      const result = await git.raw(['symbolic-ref', 'refs/remotes/origin/HEAD']);
+      const defaultBranch = result.trim().split('/').pop();
+      return defaultBranch || 'master';
+    } catch (e: any) {
+      // Fallback to common default branch names
+      try {
+        const branches = await git.branch(['-r']);
+        if (branches.all.includes('origin/main')) return 'main';
+        if (branches.all.includes('origin/master')) return 'master';
+        return 'master'; // Final fallback
+      } catch {
+        this.logger.console(chalk.yellow(`Unable to detect default branch, using 'master': ${e.toString()}`));
+        return 'master';
+      }
+    }
+  }
+
+  async getGitCommitMessage() {
+    try {
+      const commit = await git.log({
+        maxCount: 1,
+      });
+      if (!commit.latest) {
+        return null;
+      }
+      const { message, body } = commit.latest;
+      return body ? `${message}\n\n${body}` : message;
+    } catch (e: any) {
+      throw new Error(`Unable to read commit message: ${e.toString()}`);
+    }
+  }
+
+  private parseVersionBumpFromCommit(commitMessage: string): ReleaseType | null {
+    // Check explicit bump keywords (highest priority after env vars)
+    if (this.config.useExplicitBumpKeywords !== false) {
+      // default to true
+      if (commitMessage.includes('BIT-BUMP-MAJOR')) {
+        this.logger.console(chalk.blue('Found BIT-BUMP-MAJOR keyword in commit message'));
+        return 'major';
+      }
+      if (commitMessage.includes('BIT-BUMP-MINOR')) {
+        this.logger.console(chalk.blue('Found BIT-BUMP-MINOR keyword in commit message'));
+        return 'minor';
+      }
+    }
+
+    // Check conventional commits if enabled
+    if (this.config.useConventionalCommitsForVersionBump) {
+      // Check for breaking changes (major version bump)
+      if (/^feat!(\(.+\))?:|^fix!(\(.+\))?:|BREAKING CHANGE/m.test(commitMessage)) {
+        this.logger.console(chalk.blue('Found breaking changes in commit message (conventional commits)'));
+        return 'major';
+      }
+
+      // Check for features (minor version bump)
+      if (/^feat(\(.+\))?:/m.test(commitMessage)) {
+        this.logger.console(chalk.blue('Found feature commits (conventional commits)'));
+        return 'minor';
+      }
+
+      // Check for fixes (patch version bump) - explicit patch not needed as it's default
+      if (/^fix(\(.+\))?:/m.test(commitMessage)) {
+        this.logger.console(chalk.blue('Found fix commits (conventional commits) - using default patch'));
+        return 'patch';
+      }
+    }
+
+    return null; // No specific version bump detected
+  }
+
+  private async getCustomCommitMessage() {
+    try {
+      const commitMessageScript = this.config.commitMessageScript;
+
+      if (commitMessageScript) {
+        this.logger.console(chalk.blue(`Running custom commit message script: ${commitMessageScript}`));
+
+        // Parse the command to avoid shell injection
+        const parts = commitMessageScript.split(' ');
+        const command = parts[0];
+        const args = parts.slice(1);
+
+        const result = await execa(command, args, {
+          cwd: this.workspace.path,
+          encoding: 'utf8',
+        });
+        const customMessage = result.stdout.trim();
+
+        if (customMessage) {
+          this.logger.console(chalk.green(`Using custom commit message: ${customMessage}`));
+          return customMessage;
+        }
+      }
+    } catch (e: any) {
+      this.logger.console(chalk.yellow(`Failed to run custom commit message script: ${e.toString()}`));
+    }
+
+    // Fallback to default message
+    return 'chore: update .bitmap and lockfiles as needed [skip ci]';
+  }
+
+  private async verifyWorkspaceStatusInternal(strict: boolean = false) {
+    this.logger.console('📊 Workspace Status');
+    this.logger.console(chalk.blue('Verifying status of workspace'));
+
+    const status = await this.status.status({ lanes: true });
+    const { data: statusOutput, code } = await this.status.formatStatusOutput(
+      status,
+      strict
+        ? { strict: true, warnings: true } // When strict=true, fail on both errors and warnings
+        : { failOnError: true, warnings: false } // By default, fail only on errors (tag blockers)
+    );
+
+    // Log the formatted status output
+    this.logger.console(statusOutput);
+
+    if (code !== 0) {
+      throw new Error('Workspace status verification failed');
+    }
+
+    this.logger.consoleSuccess(chalk.green('Workspace status is correct'));
+    return { status };
+  }
+
+  private async switchToLane(laneName: string, options: SwitchLaneOptions = {}) {
+    this.logger.console(chalk.blue(`Switching to ${laneName}`));
+    try {
+      await this.lanes.switchLanes(laneName, {
+        forceOurs: true,
+        head: true,
+        workspaceOnly: true,
+        skipDependencyInstallation: true,
+        ...options,
+      });
+    } catch (e: any) {
+      if (e.toString().includes('already checked out')) {
+        this.logger.console(chalk.yellow(`Lane ${laneName} already checked out, skipping checkout`));
+        return true;
+      }
+      this.logger.console(chalk.red(`Failed switching to ${laneName}: ${e.toString()}`));
+    }
+  }
+
+  async verifyWorkspaceStatus() {
+    await this.verifyWorkspaceStatusInternal();
+
+    this.logger.console('🔨 Build Process');
+    const components = await this.workspace.list();
+
+    this.logger.console(chalk.blue(`Building ${components.length} components`));
+
+    const build = await this.builder.build(components);
+
+    build.throwErrorsIfExist();
+
+    this.logger.console(chalk.green('Components built'));
+
+    return { code: 0, data: '' };
+  }
+
+  async snapPrCommit({
+    laneIdStr,
+    message,
+    build,
+    strict,
+    dryRun,
+  }: {
+    laneIdStr: string;
+    message: string;
+    build: boolean | undefined;
+    strict: boolean | undefined;
+    dryRun?: boolean;
+  }) {
+    this.logger.console(chalk.blue(`Lane name: ${laneIdStr}`));
+
+    const originalLane = await this.lanes.getCurrentLane();
+
+    const laneId = await this.lanes.parseLaneId(laneIdStr);
+
+    await this.verifyWorkspaceStatusInternal(strict);
+
+    await this.importer
+      .import({
+        ids: [],
+        installNpmPackages: false,
+        writeConfigFiles: false,
+      })
+      .catch((e) => {
+        throw new Error(`Failed to import components: ${e.toString()}`);
+      });
+
+    this.logger.console('🔄 Lane Management');
+
+    // Use unique temp lane name to avoid race conditions when multiple CI jobs run concurrently
+    const tempLaneName = `${laneId.name}-${generateRandomStr(5)}`;
+    this.logger.console(chalk.blue(`Creating temporary lane ${laneId.scope}/${tempLaneName}`));
+
+    let foundErr: Error | undefined;
+    let renamedToFinalName = false;
+    try {
+      await this.lanes.createLane(tempLaneName, {
+        scope: laneId.scope,
+        forkLaneNewScope: true,
+      });
+
+      const currentLane = await this.lanes.getCurrentLane();
+
+      this.logger.console(chalk.blue(`Current lane: ${currentLane?.name ?? 'main'}`));
+
+      if (currentLane?.name !== tempLaneName) {
+        throw new Error(
+          `Expected to be on lane ${tempLaneName} after creation, but current lane is ${currentLane?.name ?? 'main'}`
+        );
+      }
+
+      this.logger.console('📦 Snapping Components');
+      const results = await this.snapping.snap({
+        message,
+        build,
+        exitOnFirstFailedTask: true,
+      });
+
+      if (!results) {
+        // No changes to snap - switch back to main and remove the temp lane we created
+        this.logger.console(chalk.yellow('No changes detected, removing temporary lane'));
+        await this.switchToLane(originalLane?.name ?? 'main');
+        await this.lanes.removeLanes([tempLaneName], { remote: false, force: true });
+        return 'No changes detected, nothing to snap';
+      }
+
+      const { snappedComponents }: SnapResults = results;
+
+      const snapOutput = snapResultOutput(results);
+      this.logger.console(snapOutput);
+
+      if (dryRun) {
+        this.logger.console(chalk.yellow('🏃 Dry-run mode: skipping export, lane deletion, and rename'));
+        this.logger.console(chalk.green(`Snapped ${snappedComponents.length} component(s) successfully`));
+        this.logger.console(
+          chalk.blue(
+            `Temporary lane "${laneId.scope}/${tempLaneName}" kept for debugging. Remove it with: bit lane remove ${laneId.scope}/${tempLaneName}`
+          )
+        );
+        return snapOutput;
+      }
+
+      // Finalize atomically: delete existing lane, rename temp lane, export
+      this.logger.console('🔄 Finalizing Lane');
+
+      // Check if original lane exists on remote and delete it (query by name to avoid fetching all lanes)
+      const existingLanes = await this.lanes.getLanes({ remote: laneId.scope, name: laneId.name }).catch((e) => {
+        // Lane not found is expected on first run - just means nothing to delete
+        if (e.toString().includes('was not found')) {
+          return [];
+        }
+        throw new Error(`Failed to check lane ${laneId.toString()}: ${e.toString()}`);
+      });
+
+      if (existingLanes.length) {
+        this.logger.console(chalk.blue(`Deleting existing remote lane ${laneId.toString()}`));
+        const archiveResult = await this.archiveLane(laneId.toString(), true); // throwOnError: delete must succeed before export
+        if (archiveResult === 'not-found') {
+          // `getLanes` just reported the lane exists, but the delete API says "not found". Re-query
+          // to confirm. If the lane still shows up, something is off on the remote (delete can't
+          // see what list/export can), and retrying will never converge.
+          let stillExists;
+          try {
+            stillExists = await this.lanes.getLanes({ remote: laneId.scope, name: laneId.name });
+          } catch (verifyErr: any) {
+            throw new Error(
+              `failed to verify whether remote lane ${laneId.toString()} still exists after delete returned "not found": ${verifyErr?.message || verifyErr}`
+            );
+          }
+          if (stillExists.length) {
+            throw new Error(
+              `unable to delete remote lane ${laneId.toString()}: the remote reports the lane as "not found" from ` +
+                `the delete API but still lists it from the query API. maybe this is a remote issue on bit.cloud. ` +
+                `please contact support or manually delete the lane on bit.cloud before re-running CI.`
+            );
+          }
+        }
+      }
+
+      // Rename temp lane to original name
+      this.logger.console(chalk.blue(`Renaming lane from ${tempLaneName} to ${laneId.name}`));
+      await this.lanes.rename(laneId.name, tempLaneName);
+      renamedToFinalName = true;
+
+      // Export with the correct name. Retry on hash-mismatch, which indicates a concurrent CI job
+      // pushed the same lane id between our pre-export delete and our merge on the hub.
+      this.logger.console(chalk.blue(`Exporting ${snappedComponents.length} components`));
+      const exportResults = await this.exportWithRetryOnLaneHashMismatch(laneId.toString());
+      this.logger.console(chalk.green(`Exported ${exportResults.componentsIds.length} components`));
+    } catch (e: any) {
+      foundErr = e;
+      throw e;
+    } finally {
+      if (foundErr) {
+        this.logger.console(chalk.red(`Found error: ${foundErr.message}`));
+      }
+      // Always switch back to the original lane
+      this.logger.console('🔄 Cleanup');
+      const targetLane = originalLane?.name ?? 'main';
+      this.logger.console(chalk.blue(`Switching back to ${targetLane}`));
+
+      const currentLane = await this.lanes.getCurrentLane();
+      if (currentLane) {
+        await this.switchToLane(targetLane);
+      } else {
+        this.logger.console(chalk.yellow('Already on main, checking out to head'));
+        await this.lanes.checkout.checkout({ head: true, skipNpmInstall: true });
+      }
+
+      // Clean up orphaned temporary lane on error. Skip if the rename to the final name already
+      // happened - in that case the temp name no longer exists locally, and the lane under the
+      // final name may have been partially exported; leave it alone rather than wipe evidence.
+      if (foundErr && !renamedToFinalName) {
+        const tempLaneFullName = `${laneId.scope}/${tempLaneName}`;
+        this.logger.console(chalk.blue(`Cleaning up temporary lane ${tempLaneFullName}`));
+        try {
+          await this.lanes.removeLanes([tempLaneFullName], { remote: false, force: true });
+          this.logger.console(chalk.green(`Removed temporary lane ${tempLaneFullName}`));
+        } catch (cleanupErr: any) {
+          // Ignore cleanup errors to avoid masking the original error
+          this.logger.console(chalk.yellow(`Failed to clean up temporary lane: ${cleanupErr?.message || cleanupErr}`));
+        }
+      }
+    }
+  }
+
+  async mergePr({
+    message: argMessage,
+    build,
+    strict,
+    releaseType,
+    preReleaseId,
+    incrementBy,
+    explicitVersionBump,
+    verbose,
+    versionsFile,
+    autoMergeResolve,
+    forceTheirs,
+    laneName,
+    skipPush,
+  }: {
+    message?: string;
+    build?: boolean;
+    strict?: boolean;
+    releaseType: ReleaseType;
+    preReleaseId?: string;
+    incrementBy?: number;
+    explicitVersionBump?: boolean;
+    verbose?: boolean;
+    versionsFile?: string;
+    autoMergeResolve?: MergeStrategy;
+    forceTheirs?: boolean;
+    laneName?: string;
+    skipPush?: boolean;
+  }) {
+    // Capture the initial commit SHA before any operations modify the repository
+    const initialCommitSha = await git.revparse(['HEAD']);
+
+    const message = argMessage || (await this.getGitCommitMessage());
+    if (!message) {
+      throw new Error('Failed to get commit message from git. Please provide a message using --message option.');
+    }
+
+    const currentLane = await this.lanes.getCurrentLane();
+    const laneComponents = currentLane?.components;
+    if (currentLane) {
+      // this doesn't normally happen. we expect this mergePr to be called from the default branch, which normally checks
+      // out to main lane.
+      this.logger.console(chalk.blue(`Currently on lane ${currentLane.name}, switching to main`));
+      await this.switchToLane('main');
+      // this is needed to make sure components that were created on the lane are now available on main.
+      // without this, the switch to main above, marks those components as not-available, and won't be tagged later on.
+      // don't use the high-level `consumer.resetLaneNew()`, because it deletes the entire local scope.
+      const changedIds = this.workspace.consumer.bitMap.resetLaneComponentsToNew();
+      if (changedIds.length) {
+        const changedIdsList = ComponentIdList.fromArray(changedIds);
+        await this.workspace.scope.legacyScope.removeMany(changedIdsList, true);
+
+        await this.workspace.clearCache();
+        await this.workspace.bitMap.write('reset lane new');
+      }
+
+      this.logger.console(chalk.green('Switched to main lane'));
+    }
+
+    // Pull latest changes from remote to ensure we have the most up-to-date .bitmap
+    // This prevents issues when multiple PRs are merged in sequence
+    const defaultBranch = await this.getDefaultBranchName();
+    this.logger.console(chalk.blue(`Pulling latest git changes from ${defaultBranch} branch`));
+
+    // Check if there are any changes to stash before rebasing
+    const gitStatus = await git.status();
+    const hasChanges = gitStatus.files.length > 0;
+
+    if (hasChanges) {
+      this.logger.console(chalk.yellow('Stashing uncommitted changes before rebase'));
+      await git.stash(['push', '-u', '-m', 'CI merge temporary stash']);
+    }
+
+    await git.pull('origin', defaultBranch, { '--rebase': 'true' });
+
+    if (hasChanges) {
+      this.logger.console(chalk.yellow('Restoring stashed changes after rebase'));
+      await git.stash(['pop']);
+    }
+
+    this.logger.console(chalk.green('Pulled latest git changes'));
+
+    this.logger.console('🔄 Checking out to main head');
+    await this.importer.importCurrentObjects();
+
+    const checkoutProps = {
+      forceOurs: !forceTheirs && !autoMergeResolve, // only force ours if neither forceTheirs nor autoMergeResolve is specified
+      head: true,
+      skipNpmInstall: true,
+      ...(forceTheirs && { forceTheirs }),
+      ...(autoMergeResolve && { mergeStrategy: autoMergeResolve }),
+    };
+    const checkoutResults = await this.checkout.checkout(checkoutProps);
+
+    await this.workspace.bitMap.write('checkout head');
+    this.logger.console(reportToString(checkoutOutput(checkoutResults, checkoutProps)));
+
+    if (laneComponents?.length) {
+      await this.restoreLaneConfigChanges(laneComponents);
+    }
+
+    // Check for workspace.jsonc conflicts
+    if (
+      checkoutResults.workspaceConfigUpdateResult?.workspaceDepsConflicts ||
+      checkoutResults.workspaceConfigUpdateResult?.workspaceConfigConflictWriteError
+    ) {
+      this.logger.console(chalk.red('❌ workspace.jsonc conflicts detected during checkout'));
+      this.logger.console(chalk.blue('\nTo resolve these conflicts, please run:'));
+      this.logger.console(chalk.bold('  bit checkout head'));
+      this.logger.console(chalk.gray('\nThis will allow you to manually resolve the conflicts in workspace.jsonc.'));
+
+      throw new Error(
+        'Cannot complete CI merge due to workspace.jsonc conflicts. Please run "bit checkout head" and fix the conflicts manually.'
+      );
+    }
+
+    // Check for conflicts when using manual merge strategy
+    if (autoMergeResolve === 'manual' && checkoutResults.leftUnresolvedConflicts) {
+      const componentsWithConflicts =
+        checkoutResults.components?.filter(
+          (c) => c.filesStatus && Object.values(c.filesStatus).some((status) => status === 'manual')
+        ) || [];
+
+      const conflictedComponentIds = componentsWithConflicts.map((c) => c.id.toString());
+
+      this.logger.console(chalk.red('❌ Merge conflicts detected during checkout'));
+      this.logger.console(chalk.yellow('The following components have conflicts:'));
+      conflictedComponentIds.forEach((id) => {
+        this.logger.console(chalk.yellow(`  - ${id}`));
+      });
+      this.logger.console(chalk.blue('\nTo resolve these conflicts, please run:'));
+      this.logger.console(chalk.bold('  bit checkout head'));
+      this.logger.console(chalk.gray('\nThis will allow you to manually resolve the conflicts.'));
+
+      throw new Error(
+        'Cannot complete CI merge due to unresolved conflicts. Please resolve conflicts manually and try again.'
+      );
+    }
+
+    const { status } = await this.verifyWorkspaceStatusInternal(strict);
+
+    const hasSoftTaggedComponents = status.softTaggedComponents.length > 0;
+
+    this.logger.console('📦 Component Operations');
+    this.logger.console(chalk.blue('Tagging components'));
+    const finalReleaseType = await this.determineReleaseType(releaseType, explicitVersionBump);
+    const tagResults = await this.snapping.tag({
+      all: true,
+      message,
+      build,
+      failFast: true,
+      persist: hasSoftTaggedComponents,
+      releaseType: finalReleaseType,
+      preReleaseId,
+      incrementBy,
+      versionsFile,
+    });
+
+    if (tagResults) {
+      const tagOutput = tagResultOutput(tagResults);
+      this.logger.console(tagOutput);
+    } else {
+      this.logger.console(chalk.yellow('No components to tag'));
+    }
+
+    const hasTaggedComponents = tagResults?.taggedComponents && tagResults.taggedComponents.length > 0;
+
+    if (hasTaggedComponents) {
+      this.logger.console(chalk.blue('Exporting components'));
+      const exportResult = await this.exporter.export();
+
+      if (exportResult.componentsIds.length > 0) {
+        this.logger.console(chalk.green(`Exported ${exportResult.componentsIds.length} component(s)`));
+      } else {
+        this.logger.console(chalk.yellow('Nothing to export'));
+      }
+
+      this.logger.console('🔄 Git Operations');
+      // Set user.email and user.name
+      await git.addConfig('user.email', 'bit-ci[bot]@bit.cloud');
+      await git.addConfig('user.name', 'Bit CI');
+
+      // Check git status before commit
+      const statusBeforeCommit = await git.status();
+      this.logger.console(chalk.blue(`Git status before commit: ${statusBeforeCommit.files.length} files`));
+      statusBeforeCommit.files.forEach((file) => {
+        this.logger.console(chalk.gray(`  ${file.working_dir}${file.index} ${file.path}`));
+      });
+
+      // Show git diff if there are uncommitted changes
+      if (verbose && statusBeforeCommit.files.length > 0) {
+        try {
+          const diff = await git.diff();
+          if (diff) {
+            this.logger.console(chalk.blue('Git diff before commit:'));
+            this.logger.console(diff);
+          }
+        } catch (error) {
+          this.logger.console(chalk.yellow(`Failed to show git diff: ${error}`));
+        }
+      }
+
+      // Previously we committed only .bitmap and pnpm-lock.yaml files.
+      // However, it's possible that "bit checkout head" we did above, modified other files as well.
+      // So now we commit all files that were changed.
+      await git.add(['.']);
+
+      const commitMessage = await this.getCustomCommitMessage();
+      await git.commit(commitMessage);
+
+      // Check git status after commit
+      const statusAfterCommit = await git.status();
+      this.logger.console(chalk.blue(`Git status after commit: ${statusAfterCommit.files.length} files`));
+      statusAfterCommit.files.forEach((file) => {
+        this.logger.console(chalk.gray(`  ${file.working_dir}${file.index} ${file.path}`));
+      });
+
+      await git.pull('origin', defaultBranch, { '--rebase': 'true' });
+      if (skipPush) {
+        this.logger.console(chalk.yellow('Skipping git push (--skip-push flag)'));
+      } else {
+        await git.push('origin', defaultBranch);
+      }
+    } else {
+      this.logger.console(chalk.yellow('No components were tagged, skipping export and git operations'));
+    }
+
+    this.logger.console(chalk.green('Merged PR'));
+
+    // Enhanced lane cleanup logic
+    await this.performLaneCleanup(currentLane, laneName, initialCommitSha);
+
+    return { code: 0, data: '' };
+  }
+
+  /**
+   * Compare lane Version extensions with main Version extensions for each component.
+   * Any config differences (e.g. env-set, deps-set) are saved to .bitmap so they survive
+   * the switch from lane to main and get included in the subsequent tag.
+   */
+  private async restoreLaneConfigChanges(laneComponents: LaneComponent[]) {
+    const scope = this.workspace.scope.legacyScope;
+    const repo = scope.objects;
+    let hasChanges = false;
+
+    const activeComponents = laneComponents.filter((c) => !c.isDeleted);
+    await Promise.all(
+      activeComponents.map(async (laneComp) => {
+        const laneVersion = (await repo.load(laneComp.head)) as Version;
+        if (!laneVersion) {
+          this.logger.console(chalk.yellow(`Warning: could not load Version object for ${laneComp.id.toString()}`));
+          return;
+        }
+
+        const laneConfig = laneVersion.extensions.toConfigObject();
+        if (!laneConfig || Object.keys(laneConfig).length === 0) return;
+
+        // Get main Version for comparison
+        let mainConfig: Record<string, any> = {};
+        const modelComp = await scope.getModelComponentIfExist(laneComp.id.changeVersion(undefined));
+        const mainHead = modelComp?.getHead();
+        if (mainHead) {
+          const mainVersion = (await repo.load(mainHead)) as Version;
+          mainConfig = mainVersion?.extensions.toConfigObject() ?? {};
+        }
+
+        for (const [aspectId, config] of Object.entries(laneConfig)) {
+          if (!isEqual(config, mainConfig[aspectId])) {
+            const updated = this.workspace.bitMap.addComponentConfig(
+              laneComp.id,
+              aspectId,
+              config as Record<string, any>
+            );
+            if (updated) hasChanges = true;
+          }
+        }
+      })
+    );
+
+    if (hasChanges) {
+      await this.workspace.bitMap.write('restore lane config');
+      await this.workspace.clearCache();
+      this.logger.console(chalk.blue('Restored config changes from lane'));
+    }
+  }
+
+  /**
+   * Performs lane cleanup by attempting to detect and delete the source lane
+   * after a successful merge, even when running on the main branch
+   */
+  private async performLaneCleanup(currentLane: any, explicitLaneName?: string, initialCommitSha?: string) {
+    this.logger.console('🗑️ Lane Cleanup');
+
+    // If we already have a current lane, use it
+    if (currentLane) {
+      this.logger.console(chalk.blue(`Found current lane: ${currentLane.name}`));
+      const laneId = currentLane.id();
+      await this.archiveLane(laneId.toString());
+      return;
+    }
+
+    // If no current lane but explicit lane name provided, try to delete it
+    if (explicitLaneName) {
+      this.logger.console(chalk.blue(`Using explicitly provided lane name: ${explicitLaneName}`));
+      try {
+        const laneId = await this.lanes.parseLaneId(explicitLaneName);
+        await this.archiveLane(laneId.toString());
+        return;
+      } catch (e: any) {
+        this.logger.console(chalk.yellow(`Failed to parse lane name '${explicitLaneName}': ${e.message}`));
+      }
+    }
+
+    // Try to auto-detect source branch/lane name using the dedicated detector
+    const sourceBranchDetector = new SourceBranchDetector(this.logger);
+    const sourceBranchName = await sourceBranchDetector.getSourceBranchName(initialCommitSha);
+    if (!sourceBranchName) {
+      this.logger.console(chalk.yellow('No current lane and unable to detect source branch - skipping lane cleanup'));
+      return;
+    }
+    try {
+      const laneIdStr = this.convertBranchToLaneId(sourceBranchName);
+
+      this.logger.console(
+        chalk.blue(`Attempting to delete lane based on source branch: ${sourceBranchName} -> ${laneIdStr}`)
+      );
+
+      const laneId = await this.lanes.parseLaneId(laneIdStr);
+      await this.archiveLane(laneId.toString());
+    } catch (e: any) {
+      this.logger.console(
+        chalk.yellow(`Error during lane cleanup for source branch '${sourceBranchName}': ${e.message}`)
+      );
+    }
+  }
+
+  /**
+   * Export with retry on lane hash-mismatch, caused by a concurrent `bit ci pr` run pushing the
+   * same lane id between our pre-export delete and the hub's merge (the export takes 1-2 minutes,
+   * plenty of time to race). Before each retry we skip if the PR branch has advanced past our
+   * commit - in that case a newer run will publish the correct lane, and retrying with our older
+   * snaps would regress the PR preview.
+   */
+  private async exportWithRetryOnLaneHashMismatch(laneIdStr: string, maxAttempts = 3) {
+    const isHashMismatchErr = (err: any) => (err?.message || err?.toString() || '').includes(LANE_HASH_MISMATCH_MARKER);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.exporter.export();
+      } catch (e: any) {
+        if (!isHashMismatchErr(e) || attempt === maxAttempts) throw e;
+        this.logger.console(
+          chalk.yellow(
+            `Export attempt ${attempt}/${maxAttempts} failed with lane hash mismatch on "${laneIdStr}" (likely a concurrent CI push). Deleting remote lane and retrying.`
+          )
+        );
+        try {
+          await this.archiveLane(laneIdStr, true);
+        } catch (archiveErr: any) {
+          // Preserve the original export error - rethrowing the archive error would hide the real
+          // reason the push was rejected.
+          this.logger.console(
+            chalk.yellow(
+              `Failed to delete remote lane "${laneIdStr}" while recovering from hash mismatch: ${archiveErr?.message || archiveErr}. Rethrowing the original export error.`
+            )
+          );
+          if (e && typeof e === 'object' && (e as any).cause == null) {
+            (e as any).cause = archiveErr;
+          }
+          throw e;
+        }
+      }
+    }
+    throw new Error(`exportWithRetryOnLaneHashMismatch: exhausted ${maxAttempts} attempts for lane ${laneIdStr}`);
+  }
+
+  /**
+   * Archives (deletes) a lane with proper error handling and logging.
+   * @param throwOnError - if true, throws on failure (use for critical operations like pre-export cleanup)
+   */
+  private async archiveLane(laneId: string, throwOnError = false): Promise<'deleted' | 'not-found' | 'error'> {
+    try {
+      this.logger.console(chalk.blue(`Archiving lane ${laneId}`));
+      // force means to remove the lane even if it was not merged. in this case, we don't care much because main already has the changes.
+      const archiveLane = await this.lanes.removeLanes([laneId], { remote: true, force: true });
+      if (archiveLane.length) {
+        this.logger.console(chalk.green(`Lane '${laneId}' archived successfully`));
+        return 'deleted';
+      }
+      this.logger.console(chalk.yellow(`Failed to archive lane '${laneId}' - no lanes were removed`));
+      return 'not-found';
+    } catch (e: any) {
+      if (e.message?.includes('was not found') || e.toString().includes('was not found')) {
+        this.logger.console(chalk.yellow(`Lane '${laneId}' was not found on the remote`));
+        return 'not-found';
+      }
+      this.logger.console(chalk.red(`Error archiving lane '${laneId}': ${e.message}`));
+      if (throwOnError) {
+        throw new Error(`Failed to delete remote lane '${laneId}': ${e.message}`);
+      }
+      return 'error';
+      // Don't throw the error - lane cleanup is not critical to the merge process
+    }
+  }
+
+  /**
+   * Auto-detect version bump from commit messages if no explicit version bump was provided
+   */
+  private async determineReleaseType(releaseType: ReleaseType, explicitVersionBump?: boolean): Promise<ReleaseType> {
+    if (explicitVersionBump) {
+      this.logger.console(chalk.blue(`Using explicit version bump: ${releaseType}`));
+      return releaseType;
+    }
+    // Only auto-detect if user didn't specify any version flags
+    const lastCommit = await this.getGitCommitMessage();
+    if (!lastCommit) {
+      this.logger.console(chalk.blue('No commit message found, using default patch'));
+      return releaseType;
+    }
+    const detectedReleaseType = this.parseVersionBumpFromCommit(lastCommit);
+    if (detectedReleaseType) {
+      this.logger.console(chalk.green(`Auto-detected version bump: ${detectedReleaseType}`));
+      return detectedReleaseType;
+    }
+    this.logger.console(chalk.blue('No specific version bump detected, using default patch'));
+    return releaseType;
+  }
+}
+
+function reportToString(result: string | { data: string }): string {
+  return typeof result === 'string' ? result : result.data;
+}
+
+CiAspect.addRuntime(CiMain);

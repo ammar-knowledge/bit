@@ -1,27 +1,36 @@
-import { CLIAspect, CLIMain, MainRuntime } from '@teambit/cli';
+import type { CLIMain } from '@teambit/cli';
+import { CLIAspect, MainRuntime } from '@teambit/cli';
 import moment from 'moment';
-import { ComponentID } from '@teambit/component-id';
-import {
-  DependencyResolverAspect,
-  DependencyResolverMain,
-  KEY_NAME_BY_LIFECYCLE_TYPE,
-} from '@teambit/dependency-resolver';
-import { WorkspaceAspect, OutsideWorkspaceError, Workspace } from '@teambit/workspace';
-import { cloneDeep, compact, set } from 'lodash';
+import type { ComponentID } from '@teambit/component-id';
+import type { DependencyResolverMain } from '@teambit/dependency-resolver';
+import { DependencyResolverAspect, KEY_NAME_BY_LIFECYCLE_TYPE } from '@teambit/dependency-resolver';
+import type { Workspace } from '@teambit/workspace';
+import { WorkspaceAspect, OutsideWorkspaceError } from '@teambit/workspace';
+import fs from 'fs-extra';
+import path from 'path';
+import semver from 'semver';
+import { cloneDeep, compact, set, uniq } from 'lodash';
 import pMapSeries from 'p-map-series';
-import ConsumerComponent from '@teambit/legacy/dist/consumer/component';
-import ComponentLoader, { DependencyLoaderOpts } from '@teambit/legacy/dist/consumer/component/component-loader';
-import { DevFilesAspect, DevFilesMain } from '@teambit/dev-files';
-import { GraphAspect, ComponentIdGraph, GraphMain } from '@teambit/graph';
-import { AspectLoaderAspect, AspectLoaderMain } from '@teambit/aspect-loader';
+import type { ConsumerComponent, DependencyLoaderOpts } from '@teambit/legacy.consumer-component';
+import { ComponentLoader } from '@teambit/legacy.consumer-component';
+import type { DevFilesMain } from '@teambit/dev-files';
+import { DevFilesAspect } from '@teambit/dev-files';
+import type { ComponentIdGraph, GraphMain } from '@teambit/graph';
+import { GraphAspect } from '@teambit/graph';
+import type { AspectLoaderMain } from '@teambit/aspect-loader';
+import { AspectLoaderAspect } from '@teambit/aspect-loader';
 import { snapToSemver } from '@teambit/component-package-version';
-import { ScopeAspect, ScopeMain } from '@teambit/scope';
+import type { ScopeMain } from '@teambit/scope';
+import { ScopeAspect } from '@teambit/scope';
 import { DependenciesLoader } from './dependencies-loader/dependencies-loader';
-import { DependenciesData, OverridesDependenciesData } from './dependencies-loader/dependencies-data';
+import type { DependenciesData, OverridesDependenciesData } from './dependencies-loader/dependencies-data';
+import type { RemoveDependenciesFlags, SetDependenciesFlags } from './dependencies-cmd';
 import {
   DependenciesBlameCmd,
+  DependenciesCircularCmd,
   DependenciesCmd,
   DependenciesDebugCmd,
+  DependenciesDiagnoseCmd,
   DependenciesEjectCmd,
   DependenciesGetCmd,
   DependenciesRemoveCmd,
@@ -29,13 +38,16 @@ import {
   DependenciesSetCmd,
   DependenciesUnsetCmd,
   DependenciesUsageCmd,
-  RemoveDependenciesFlags,
-  SetDependenciesFlags,
+  DependenciesWriteCmd,
   SetPeerCmd,
+  UnsetPeerCmd,
   WhyCmd,
 } from './dependencies-cmd';
 import { DependenciesAspect } from './dependencies.aspect';
-import { DebugDependencies } from './dependencies-loader/auto-detect-deps';
+import type { DebugDependencies } from './dependencies-loader/auto-detect-deps';
+import { DependentsCmd } from './dependents-cmd';
+import type { Logger, LoggerMain } from '@teambit/logger';
+import { LoggerAspect } from '@teambit/logger';
 
 export type RemoveDependencyResult = { id: ComponentID; removedPackages: string[] };
 export type SetDependenciesResult = { changedComps: string[]; addedPackages: Record<string, string> };
@@ -56,6 +68,47 @@ export type BlameResult = {
   version: string;
 };
 
+/** Max component entries per version origin — keeps output and memory bounded. */
+const MAX_ORIGIN_COMPONENTS = 5;
+
+export type VersionOrigin = {
+  version: string;
+  envs: string[];
+  components: Array<{ componentId: string; envId: string }>;
+};
+
+export interface DiagnosisReport {
+  componentCount: number;
+  /** total directories in node_modules/.pnpm — the actual installed copies on disk */
+  pnpmStoreEntries: number;
+  /** unique package names (regardless of version/peer combo) */
+  uniquePackages: number;
+  /** packages that appear in more than one .pnpm directory (version spread + peer permutations) */
+  duplicatedPackages: number;
+  versionSpread: Array<{
+    packageName: string;
+    /** how many distinct versions exist across components */
+    versionCount: number;
+    versions: string[];
+    /** how many actual .pnpm directories this package has (includes peer permutations) */
+    installedCopies: number;
+    impact: 'HIGH' | 'MEDIUM' | 'LOW';
+  }>;
+  peerPermutations: Array<{
+    packageName: string;
+    /** declared peer-dep version ranges across components */
+    versions: string[];
+    /** actual .pnpm directories for this package (0 means declared but not installed) */
+    installedCopies: number;
+    versionOrigins: VersionOrigin[];
+  }>;
+}
+
+/** Compare two version strings: semver-aware when both are valid, lexicographic otherwise. */
+function compareVersions(a: string, b: string): number {
+  return semver.valid(a) && semver.valid(b) ? semver.compare(a, b) : a.localeCompare(b);
+}
+
 export class DependenciesMain {
   constructor(
     private workspace: Workspace,
@@ -63,7 +116,8 @@ export class DependenciesMain {
     private dependencyResolver: DependencyResolverMain,
     private devFiles: DevFilesMain,
     private aspectLoader: AspectLoaderMain,
-    private graph: GraphMain
+    private graph: GraphMain,
+    private logger: Logger
   ) {}
 
   async setPeer(componentId: string, range?: string): Promise<void> {
@@ -75,6 +129,37 @@ export class DependenciesMain {
     });
 
     await this.workspace.bitMap.write(`set-peer (${componentId})`);
+    // Peer status is determined by reading the `bit.peer` field from the component's node_modules
+    // package.json, which the linker writes AFTER dep resolution runs during `bit install`. This
+    // means dep resolution during install re-populates the cache with stale data (no bit.peer yet),
+    // and the linker's subsequent package.json update doesn't clear the cache on its own unless the
+    // content actually changed (see node-modules-linker). Clearing here ensures the cache is empty
+    // going into install so that after the linker writes the correct package.json, any subsequent
+    // `bit show` will compute deps fresh.
+    // Other dep mutations (setDependency, removeDependency, etc.) don't need this because they only
+    // change the component's own .bitmap policy, which dep resolution reads directly; the normal
+    // invalidateDependenciesCacheIfNeeded mechanism (checking .bitmap mtime) is sufficient there.
+    await this.workspace.consumer.componentFsCache.deleteAllDependenciesDataCache();
+  }
+
+  async unsetPeer(componentId: string): Promise<void> {
+    const compId = await this.workspace.resolveComponentId(componentId);
+    // const config = { peer: true, defaultPeerRange: range };
+    const config = await this.workspace.getAspectConfigForComponent(compId, DependencyResolverAspect.id);
+    if (config) {
+      if ('peer' in config) {
+        delete config.peer;
+      }
+      if ('defaultPeerRange' in config) {
+        delete config.defaultPeerRange;
+      }
+    }
+    this.workspace.bitMap.addComponentConfig(compId, DependencyResolverAspect.id, config);
+
+    await this.workspace.bitMap.write(`unset-peer (${componentId})`);
+    // Same reasoning as in setPeer: clears the stale cache before the next install rewrites the
+    // component's node_modules package.json without the bit.peer field.
+    await this.workspace.consumer.componentFsCache.deleteAllDependenciesDataCache();
   }
 
   async setDependency(
@@ -127,9 +212,20 @@ export class DependenciesMain {
     options: RemoveDependenciesFlags = {},
     removeOnlyIfExists = false // unset
   ): Promise<RemoveDependencyResult[]> {
+    const getLifeCycle = () => {
+      if (options.dev) return 'dev';
+      if (options.peer) return 'peer';
+      return 'runtime';
+    };
     const compIds = await this.workspace.idsByPattern(componentPattern);
     const results = await pMapSeries(compIds, async (compId) => {
       const component = await this.workspace.get(compId);
+      const missingPackages = uniq(
+        component.state.issues
+          .getIssueByName('MissingPackagesDependenciesOnFs')
+          ?.data.map((d) => d.missingPackages)
+          .flat() || []
+      );
       const depList = this.dependencyResolver.getDependencies(component);
       const getCurrentConfig = async () => {
         const currentConfigFromWorkspace = await this.workspace.getSpecificComponentConfig(
@@ -142,17 +238,18 @@ export class DependenciesMain {
       };
       const currentDepResolverConfig = await getCurrentConfig();
       const newDepResolverConfig = cloneDeep(currentDepResolverConfig || {});
+      const depField = KEY_NAME_BY_LIFECYCLE_TYPE[getLifeCycle()];
       const removedPackagesWithNulls = await pMapSeries(packages, async (pkg) => {
         const [name, version] = this.splitPkgToNameAndVer(pkg);
-        const dependency = depList.findByPkgNameOrCompId(name, version);
-        if (!dependency) return null;
+        const dependency = depList.findByPkgNameOrCompId(name, version, getLifeCycle());
+        if (!dependency) {
+          if (!missingPackages.includes(name)) return null;
+          if (removeOnlyIfExists) return null;
+          set(newDepResolverConfig, ['policy', depField, name], '-');
+          return `${name}@${version || 'latest'}`;
+        }
         const depName = dependency.getPackageName?.() || dependency.id;
-        const getLifeCycle = () => {
-          if (options.dev) return 'dev';
-          if (options.peer) return 'peer';
-          return dependency.lifecycle;
-        };
-        const depField = KEY_NAME_BY_LIFECYCLE_TYPE[getLifeCycle()];
+
         const existsInSpecificConfig = newDepResolverConfig.policy?.[depField]?.[depName];
         if (existsInSpecificConfig) {
           if (existsInSpecificConfig === '-') return null;
@@ -201,6 +298,20 @@ export class DependenciesMain {
     return compIds;
   }
 
+  /**
+   * Find circular dependencies in the workspace component graph.
+   * Returns an array of cycles, where each cycle is an array of component-id strings
+   * (with the first component repeated at the end to make the circular path visible).
+   */
+  async getCircularDependencies(includeDeps?: boolean): Promise<string[][]> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
+    const graph = await this.graph.getGraphIds();
+    const cycles = graph.findCycles(undefined, includeDeps);
+    // append the first component to the end to make the circular visible in the output
+    cycles.forEach((cycle) => cycle.push(cycle[0]));
+    return cycles;
+  }
+
   async getDependencies(id: string, scope?: boolean): Promise<DependenciesResults> {
     const factory = this.workspace && !scope ? this.workspace : this.scope;
     const compId = await (this.workspace || this.scope).resolveComponentId(id);
@@ -216,7 +327,8 @@ export class DependenciesMain {
       component,
       this.dependencyResolver,
       this.devFiles,
-      this.aspectLoader
+      this.aspectLoader,
+      this.logger
     );
     return dependenciesLoader.load(this.workspace, opts);
   }
@@ -232,7 +344,8 @@ export class DependenciesMain {
       component,
       this.dependencyResolver,
       this.devFiles,
-      this.aspectLoader
+      this.aspectLoader,
+      this.logger
     );
     return dependenciesLoader.loadFromScope(dependenciesData);
   }
@@ -303,6 +416,7 @@ export class DependenciesMain {
   }
 
   async usageDeep(depName: string, opts?: { depth?: number }): Promise<string | undefined> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
     if (!isComponentId(depName)) {
       return this.dependencyResolver.getPackageManager()?.findUsages?.(depName, {
         lockfileDir: this.workspace.path,
@@ -317,6 +431,7 @@ export class DependenciesMain {
    * @returns a map of component-id-string to the version of the dependency
    */
   async usage(depName: string): Promise<{ [compIdStr: string]: string }> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
     const [name, version] = this.splitPkgToNameAndVer(depName);
     const allComps = await this.workspace.list();
     const results = {};
@@ -330,6 +445,200 @@ export class DependenciesMain {
       })
     );
     return results;
+  }
+
+  /**
+   * Analyze the workspace's installed dependencies to detect bloat and duplication.
+   * Scans node_modules/.pnpm for ground truth on actual installed copies.
+   * Only works with pnpm-managed workspaces.
+   */
+  async diagnose(): Promise<DiagnosisReport> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
+
+    const allComps = await this.workspace.list();
+    const componentCount = allComps.length;
+
+    // 1. Scan node_modules/.pnpm for ground truth — each directory is an actual installed copy
+    const pnpmDir = path.join(this.workspace.path, 'node_modules', '.pnpm');
+    const pnpmDirExists = await fs.pathExists(pnpmDir);
+    if (!pnpmDirExists) {
+      throw new Error(
+        `"bit deps diagnose" requires a pnpm-managed workspace. ` +
+          `Expected "${pnpmDir}" to exist. Run "bit install" first.`
+      );
+    }
+    const pnpmEntries = await fs.readdir(pnpmDir);
+
+    const pnpmPackageCopies = new Map<string, number>();
+    let pnpmStoreEntries = 0;
+    for (const entry of pnpmEntries) {
+      if (entry.startsWith('.') || entry === 'node_modules') continue;
+      pnpmStoreEntries++;
+      const pkgName = this.parsePnpmDirPackageName(entry);
+      if (pkgName) {
+        pnpmPackageCopies.set(pkgName, (pnpmPackageCopies.get(pkgName) || 0) + 1);
+      }
+    }
+
+    const uniquePackages = pnpmPackageCopies.size;
+    const duplicatedPackages = Array.from(pnpmPackageCopies.values()).filter((c) => c > 1).length;
+
+    // 2. Collect component-level dep info (for version spread + peer lifecycle detection)
+    const packageVersionMap = new Map<string, { versions: Set<string>; lifecycles: Set<string> }>();
+    // Track peer version origins: pkgName -> version -> { envs, components }
+    // We track ALL lifecycles so non-peer versions of peer packages also appear in origins.
+    const peerOrigins = new Map<
+      string,
+      Map<string, { envs: Set<string>; components: Array<{ componentId: string; envId: string }> }>
+    >();
+    for (const comp of allComps) {
+      let envId: string;
+      try {
+        envId = this.workspace.envs.getEnvId(comp);
+      } catch (err: any) {
+        this.logger.debug(`diagnose: failed to get envId for ${comp.id.toString()}: ${err.message}`);
+        envId = 'unknown';
+      }
+      const depList = this.dependencyResolver.getDependencies(comp);
+      depList.forEach((dep) => {
+        const pkgName = dep.getPackageName?.() || dep.id;
+        let entry = packageVersionMap.get(pkgName);
+        if (!entry) {
+          entry = { versions: new Set(), lifecycles: new Set() };
+          packageVersionMap.set(pkgName, entry);
+        }
+        entry.versions.add(dep.version);
+        entry.lifecycles.add(dep.lifecycle);
+        let versionMap = peerOrigins.get(pkgName);
+        if (!versionMap) {
+          versionMap = new Map();
+          peerOrigins.set(pkgName, versionMap);
+        }
+        let origin = versionMap.get(dep.version);
+        if (!origin) {
+          origin = { envs: new Set(), components: [] };
+          versionMap.set(dep.version, origin);
+        }
+        if (dep.source === 'env') {
+          origin.envs.add(envId);
+        } else if (origin.components.length < MAX_ORIGIN_COMPONENTS) {
+          origin.components.push({ componentId: comp.id.toStringWithoutVersion(), envId });
+        }
+      });
+    }
+
+    // 3. Version spread — packages with the most distinct versions, enriched with .pnpm copy count
+    const versionSpread = Array.from(packageVersionMap.entries())
+      .filter(([, data]) => data.versions.size > 1)
+      .map(([pkgName, data]) => {
+        const versionCount = data.versions.size;
+        const versions = Array.from(data.versions).sort(compareVersions);
+        const installedCopies = pnpmPackageCopies.get(pkgName) || versionCount;
+        const impact: 'HIGH' | 'MEDIUM' | 'LOW' =
+          installedCopies >= 10 ? 'HIGH' : installedCopies >= 5 ? 'MEDIUM' : 'LOW';
+        return { packageName: pkgName, versionCount, versions, installedCopies, impact };
+      })
+      .sort((a, b) => b.installedCopies - a.installedCopies)
+      .slice(0, 30);
+
+    // 4. Peer deps with multiple versions, enriched with actual .pnpm copy count
+    const peerPermutations = Array.from(packageVersionMap.entries())
+      .filter(([, data]) => data.lifecycles.has('peer') && data.versions.size > 1)
+      .map(([pkgName, data]) => {
+        const versionMap = peerOrigins.get(pkgName);
+        const versionOrigins: VersionOrigin[] = [];
+        if (versionMap) {
+          for (const [ver, origin] of versionMap) {
+            const envs = Array.from(origin.envs).sort();
+            // Exclude components already listed as envs for this version
+            const components = origin.components
+              .filter((o) => !origin.envs.has(o.componentId))
+              .sort((a, b) => a.componentId.localeCompare(b.componentId));
+            versionOrigins.push({ version: ver, envs, components });
+          }
+          versionOrigins.sort((a, b) => compareVersions(a.version, b.version));
+        }
+        return {
+          packageName: pkgName,
+          versions: Array.from(data.versions).sort(compareVersions),
+          installedCopies: pnpmPackageCopies.get(pkgName) || 0,
+          versionOrigins,
+        };
+      })
+      .sort((a, b) => b.installedCopies - a.installedCopies || b.versions.length - a.versions.length);
+
+    return {
+      componentCount,
+      pnpmStoreEntries,
+      uniquePackages,
+      duplicatedPackages,
+      versionSpread,
+      peerPermutations,
+    };
+  }
+
+  /**
+   * Parse a .pnpm directory name to extract the package name.
+   * Format: @scope+name@version_peers...  or  name@version_peers...
+   */
+  private parsePnpmDirPackageName(dirName: string): string | null {
+    if (dirName.startsWith('@')) {
+      // Scoped package: @scope+name@version...
+      const plusIdx = dirName.indexOf('+');
+      if (plusIdx === -1) return null;
+      const scope = dirName.substring(0, plusIdx);
+      const rest = dirName.substring(plusIdx + 1);
+      const atIdx = rest.indexOf('@');
+      if (atIdx === -1) return null;
+      const name = rest.substring(0, atIdx);
+      return `${scope}/${name}`;
+    }
+    // Regular package: name@version...
+    const atIdx = dirName.indexOf('@');
+    if (atIdx === -1) return null;
+    return dirName.substring(0, atIdx);
+  }
+
+  /** Inspect all .pnpm entries for a specific package, showing each installed copy and its peer combo. */
+  async diagnoseDrillDown(
+    packageName: string
+  ): Promise<{ packageName: string; pnpmDirs: Array<{ version: string; peerSuffix: string | null }> }> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
+    const pnpmDir = path.join(this.workspace.path, 'node_modules', '.pnpm');
+    const pnpmDirExists = await fs.pathExists(pnpmDir);
+    if (!pnpmDirExists) {
+      throw new Error(
+        `"bit deps diagnose --package" requires a pnpm-managed workspace. ` +
+          `Expected "${pnpmDir}" to exist. Run "bit install" first.`
+      );
+    }
+    const entries = await fs.readdir(pnpmDir);
+
+    // Convert package name to .pnpm format: @scope/name → @scope+name
+    const pnpmPrefix = packageName.replace('/', '+');
+
+    const pnpmDirs: Array<{ version: string; peerSuffix: string | null }> = [];
+    for (const entry of entries) {
+      if (!entry.startsWith(pnpmPrefix + '@')) continue;
+      // Extract version and peer suffix from: @scope+name@version_peer1@ver_peer2@ver
+      const afterName = entry.substring(pnpmPrefix.length + 1); // skip "name@"
+      const underscoreIdx = afterName.indexOf('_');
+      if (underscoreIdx === -1) {
+        pnpmDirs.push({ version: afterName, peerSuffix: null });
+      } else {
+        const version = afterName.substring(0, underscoreIdx);
+        const rawPeerSuffix = afterName.substring(underscoreIdx + 1);
+        const peerSegments = rawPeerSuffix.split('_').filter(Boolean);
+        const peerSuffix = peerSegments.map((seg) => seg.replace(/\+/g, '/')).join(' + ') || null;
+        pnpmDirs.push({ version, peerSuffix });
+      }
+    }
+
+    pnpmDirs.sort(
+      (a, b) => compareVersions(a.version, b.version) || (a.peerSuffix || '').localeCompare(b.peerSuffix || '')
+    );
+
+    return { packageName, pnpmDirs };
   }
 
   private async getPackageNameAndVerResolved(pkg: string): Promise<[string, string]> {
@@ -364,20 +673,23 @@ export class DependenciesMain {
     AspectLoaderAspect,
     ScopeAspect,
     GraphAspect,
+    LoggerAspect,
   ];
 
   static runtime = MainRuntime;
 
-  static async provider([cli, workspace, depsResolver, devFiles, aspectLoader, scope, graph]: [
+  static async provider([cli, workspace, depsResolver, devFiles, aspectLoader, scope, graph, loggerMain]: [
     CLIMain,
     Workspace,
     DependencyResolverMain,
     DevFilesMain,
     AspectLoaderMain,
     ScopeMain,
-    GraphMain
+    GraphMain,
+    LoggerMain,
   ]) {
-    const depsMain = new DependenciesMain(workspace, scope, depsResolver, devFiles, aspectLoader, graph);
+    const logger = loggerMain.createLogger(DependenciesAspect.id);
+    const depsMain = new DependenciesMain(workspace, scope, depsResolver, devFiles, aspectLoader, graph, logger);
     const depsCmd = new DependenciesCmd();
     depsCmd.commands = [
       new DependenciesGetCmd(depsMain),
@@ -389,10 +701,17 @@ export class DependenciesMain {
       new DependenciesEjectCmd(depsMain),
       new DependenciesBlameCmd(depsMain),
       new DependenciesUsageCmd(depsMain),
+      new DependenciesDiagnoseCmd(depsMain),
+      new DependenciesCircularCmd(depsMain),
+      new DependenciesWriteCmd(workspace),
     ];
-    const whyCmd = new WhyCmd(depsMain);
-    const setPeerCmd = new SetPeerCmd(depsMain);
-    cli.register(depsCmd, whyCmd, setPeerCmd);
+    cli.register(
+      depsCmd,
+      new WhyCmd(depsMain),
+      new SetPeerCmd(depsMain),
+      new UnsetPeerCmd(depsMain),
+      new DependentsCmd(workspace)
+    );
 
     ComponentLoader.loadDeps = depsMain.loadDependencies.bind(depsMain);
 

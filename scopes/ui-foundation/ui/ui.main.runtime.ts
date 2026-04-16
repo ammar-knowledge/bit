@@ -1,36 +1,42 @@
 import { existsSync, readFileSync } from 'fs';
-import { ComponentType } from 'react';
+import type { ComponentType } from 'react';
 import type { AspectMain } from '@teambit/aspect';
-import { AspectDefinition, getAspectDirFromBvm } from '@teambit/aspect-loader';
-import { CacheAspect, CacheMain } from '@teambit/cache';
-import { CLIAspect, CLIMain, MainRuntime } from '@teambit/cli';
+import type { AspectDefinition } from '@teambit/aspect-loader';
+import { getAspectDirFromBvm } from '@teambit/aspect-loader';
+import type { CacheMain } from '@teambit/cache';
+import { CacheAspect } from '@teambit/cache';
+import type { CLIMain } from '@teambit/cli';
+import { CLIAspect, MainRuntime } from '@teambit/cli';
 import type { ComponentMain } from '@teambit/component';
 import { ComponentAspect } from '@teambit/component';
-import { ExpressAspect, ExpressMain } from '@teambit/express';
+import type { ExpressMain } from '@teambit/express';
+import { ExpressAspect } from '@teambit/express';
 import type { GraphqlMain } from '@teambit/graphql';
 import { GraphqlAspect } from '@teambit/graphql';
 import chalk from 'chalk';
-import { Slot, SlotRegistry, Harmony } from '@teambit/harmony';
-import { Logger, LoggerAspect, LoggerMain } from '@teambit/logger';
-import { PubsubAspect, PubsubMain } from '@teambit/pubsub';
-import { sha1 } from '@teambit/legacy/dist/utils';
+import type { SlotRegistry, Harmony } from '@teambit/harmony';
+import { Slot } from '@teambit/harmony';
+import type { Logger, LoggerMain } from '@teambit/logger';
+import { LoggerAspect } from '@teambit/logger';
+import type { PubsubMain } from '@teambit/pubsub';
+import { PubsubAspect } from '@teambit/pubsub';
+import { sha1 } from '@teambit/toolbox.crypto.sha1';
 import pMapSeries from 'p-map-series';
 import fs from 'fs-extra';
 import { Port } from '@teambit/toolbox.network.get-port';
 import { createRoot } from '@teambit/harmony.modules.harmony-root-generator';
-import { join, resolve } from 'path';
-import { promisify } from 'util';
-import webpack from 'webpack';
+import { join, resolve as pathResolve } from 'path';
+import { rspack } from '@rspack/core';
 import { UiServerStartedEvent } from './events';
 import { UnknownUI, UnknownBuildError } from './exceptions';
 import { StartCmd } from './start.cmd';
 import { UIBuildCmd } from './ui-build.cmd';
-import { UIRoot } from './ui-root';
+import type { UIRoot } from './ui-root';
 import { UIServer } from './ui-server';
 import { UIAspect, UIRuntime } from './ui.aspect';
-import createWebpackConfig from './webpack/webpack.browser.config';
-import createSsrWebpackConfig from './webpack/webpack.ssr.config';
-import { StartPlugin, StartPluginOptions } from './start-plugin';
+import createRspackBrowserConfig from './rspack/rspack.browser.config';
+import createRspackSsrConfig from './rspack/rspack.ssr.config';
+import type { StartPlugin, StartPluginOptions } from './start-plugin';
 import { BundleUiTask, BUNDLE_UI_HASH_FILENAME } from './bundle-ui.task';
 
 export type UIDeps = [PubsubMain, CLIMain, GraphqlMain, ExpressMain, ComponentMain, CacheMain, LoggerMain, AspectMain];
@@ -119,10 +125,21 @@ export type RuntimeOptions = {
    * skip build the UI before start
    */
   skipUiBuild?: boolean;
+
+  /**
+   * Show the internal urls of the dev servers
+   */
+  showInternalUrls?: boolean;
+
+  /**
+   * resolve component previews from root node_modules instead of .bit_roots
+   */
+  useRootModules?: boolean;
 };
 
 export class UiMain {
   private _isBundleUiServed = false;
+  private currentUIServer: UIServer | undefined;
 
   constructor(
     /**
@@ -214,8 +231,7 @@ export class UiMain {
   /**
    * create a build of the given UI root.
    */
-  async build(uiRootAspectIdOrName?: string, customOutputPath?: string): Promise<webpack.MultiStats | undefined> {
-    // TODO: change to MultiStats from webpack once they export it in their types
+  async build(uiRootAspectIdOrName?: string, customOutputPath?: string): Promise<any> {
     this.logger.debug(`build, uiRootAspectIdOrName: "${uiRootAspectIdOrName}"`);
     const maybeUiRoot = this.getUi(uiRootAspectIdOrName);
 
@@ -226,21 +242,37 @@ export class UiMain {
     const ssr = uiRoot.buildOptions?.ssr || false;
     const mainEntry = await this.generateRoot(await uiRoot.resolveAspects(UIRuntime.name), uiRootAspectId);
     const outputPath = customOutputPath || uiRoot.path;
+    const publicDir = await this.publicDir(uiRoot);
 
-    const browserConfig = createWebpackConfig(outputPath, [mainEntry], uiRoot.name, await this.publicDir(uiRoot));
-    const ssrConfig = ssr && createSsrWebpackConfig(outputPath, [mainEntry], await this.publicDir(uiRoot));
-
-    const config = [browserConfig, ssrConfig].filter((x) => !!x) as webpack.Configuration[];
-
-    const compiler = webpack(config);
-    this.logger.debug(`build, uiRootAspectIdOrName: "${uiRootAspectIdOrName}" running webpack`);
-    const compilerRun = promisify(compiler.run.bind(compiler));
-    const results = await compilerRun();
-    this.logger.debug(`build, uiRootAspectIdOrName: "${uiRootAspectIdOrName}" completed webpack`);
+    const browserConfig = createRspackBrowserConfig(outputPath, [mainEntry], uiRoot.name, publicDir);
+    const compiler = rspack(browserConfig as any);
+    this.logger.debug(`rspack (build): running for browser`);
+    const [results, errors] = await this.runRspackPromise(compiler);
+    this.logger.debug(`rspack (build): completed browser`);
     if (!results) throw new UnknownBuildError();
+    if (errors) {
+      this.clearConsole();
+      throw new Error(errors);
+    }
     if (results?.hasErrors()) {
       this.clearConsole();
       throw new Error(results?.toString());
+    }
+
+    if (ssr) {
+      const ssrConfig = createRspackSsrConfig(outputPath, [mainEntry], publicDir);
+      const ssrCompiler = rspack(ssrConfig as any);
+      this.logger.debug(`rspack (build): running for SSR`);
+      const [ssrResults, ssrErrors] = await this.runRspackPromise(ssrCompiler);
+      this.logger.debug(`rspack (build): completed SSR build`);
+      if (ssrErrors) {
+        this.clearConsole();
+        throw new Error(ssrErrors);
+      }
+      if (ssrResults?.hasErrors()) {
+        this.clearConsole();
+        throw new Error(ssrResults?.toString());
+      }
     }
 
     return results;
@@ -251,6 +283,18 @@ export class UiMain {
     return this;
   }
 
+  private async runRspackPromise(compiler: any): Promise<[any | undefined, string | undefined]> {
+    return new Promise((resolve) =>
+      compiler.run((err, stats) => {
+        if (err) {
+          this.logger.error('get error from rspack compiler, when bundling ui server, full error:', err);
+          return resolve([undefined, `${err.toString()}\n${err.stack}`]);
+        }
+        return resolve([stats, undefined]);
+      })
+    );
+  }
+
   private async initiatePlugins(options: StartPluginOptions) {
     const plugins = this.startPluginSlot.values();
     await pMapSeries(plugins, (plugin) => plugin.initiate(options));
@@ -259,12 +303,15 @@ export class UiMain {
 
   runtimeOptions: RuntimeOptions = {};
 
+  getUIServer(): UIServer | undefined {
+    return this.currentUIServer;
+  }
   /**
    * create a Bit UI runtime.
    */
   async createRuntime(runtimeOptions: RuntimeOptions) {
     this.runtimeOptions = runtimeOptions;
-    const { uiRootName, pattern, dev, port, rebuild, verbose, skipUiBuild } = this.runtimeOptions;
+    const { uiRootName, pattern, dev, port, rebuild, verbose, skipUiBuild, showInternalUrls } = this.runtimeOptions;
     // uiRootName to be deprecated
     const uiRootAspectIdOrName = uiRootName || runtimeOptions.uiRootAspectIdOrName;
     const maybeUiRoot = this.getUi(uiRootAspectIdOrName);
@@ -275,6 +322,7 @@ export class UiMain {
     const plugins = await this.initiatePlugins({
       verbose,
       pattern,
+      showInternalUrls,
     });
 
     if (this.componentExtension.isHost(uiRootAspectId)) this.componentExtension.setHostPriority(uiRootAspectId);
@@ -290,6 +338,8 @@ export class UiMain {
       publicDir,
       startPlugins: plugins,
     });
+
+    this.currentUIServer = uiServer;
 
     // Adding signal listeners to make sure we immediately close the process on sigint / sigterm (otherwise webpack dev server closing will take time)
     this.addSignalListener();
@@ -462,7 +512,7 @@ export class UiMain {
       harmonyPackage,
       shouldRun
     );
-    const filepath = resolve(join(path || __dirname, `${runtimeName}.root${sha1(contents)}.js`));
+    const filepath = pathResolve(join(path || __dirname, `${runtimeName}.root${sha1(contents)}.js`));
     if (fs.existsSync(filepath)) return filepath;
     fs.outputFileSync(filepath, contents);
     return filepath;
@@ -522,13 +572,13 @@ export class UiMain {
 
     if (!cachedBuildUiHash) {
       this.logger.console(
-        `Building UI assets for '${chalk.cyan(uiRoot.name)}' in target directory: ${chalk.cyan(
+        `${chalk.magenta('[Rspack]')} Building UI assets for '${chalk.cyan(uiRoot.name)}' in target directory: ${chalk.cyan(
           await this.publicDir(uiRoot)
         )}. The first time we build the UI it may take a few minutes.`
       );
     } else {
       this.logger.console(
-        `Rebuilding UI assets for '${chalk.cyan(uiRoot.name)} in target directory: ${chalk.cyan(
+        `${chalk.magenta('[Rspack]')} Rebuilding UI assets for '${chalk.cyan(uiRoot.name)}' in target directory: ${chalk.cyan(
           await this.publicDir(uiRoot)
         )}' as ${uiRoot.configFile} has been changed.`
       );
@@ -588,13 +638,13 @@ export class UiMain {
   private async buildIfNoBundle(uiRootAspectId: string, uiRoot: UIRoot): Promise<boolean> {
     if (this._isBundleUiServed) return false;
 
-    const config = createWebpackConfig(
+    const config = createRspackBrowserConfig(
       uiRoot.path,
       [await this.generateRoot(await uiRoot.resolveAspects(UIRuntime.name), uiRootAspectId)],
       uiRoot.name,
       await this.publicDir(uiRoot)
     );
-    if (config.output?.path && fs.pathExistsSync(config.output.path)) return false;
+    if (config.output?.path && fs.pathExistsSync(config.output.path as string)) return false;
     const hash = await this.createBuildUiHash(uiRoot);
     await this.build(uiRootAspectId);
     await this.cache.set(uiRoot.path, hash);
@@ -644,7 +694,7 @@ export class UiMain {
       OnStartSlot,
       PublicDirOverwriteSlot,
       BuildMethodOverwriteSlot,
-      StartPluginSlot
+      StartPluginSlot,
     ],
     harmony: Harmony
   ) {

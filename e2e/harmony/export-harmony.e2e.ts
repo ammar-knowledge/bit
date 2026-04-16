@@ -1,9 +1,8 @@
 import chai, { expect } from 'chai';
-import Helper from '../../src/e2e-helper/e2e-helper';
-import { ExportMissingVersions } from '../../src/scope/exceptions/export-missing-versions';
-import ServerIsBusy from '../../src/scope/exceptions/server-is-busy';
-
-chai.use(require('chai-fs'));
+import { Helper } from '@teambit/legacy.e2e-helper';
+import { ExportMissingVersions, ServerIsBusy } from '@teambit/legacy.scope';
+import chaiFs from 'chai-fs';
+chai.use(chaiFs);
 
 describe('export functionality on Harmony', function () {
   this.timeout(0);
@@ -16,7 +15,7 @@ describe('export functionality on Harmony', function () {
   });
   describe('export, re-init the remote scope, tag and export', () => {
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       helper.fixtures.populateComponents(1);
       helper.command.tagAllWithoutBuild();
       helper.command.export();
@@ -35,7 +34,7 @@ describe('export functionality on Harmony', function () {
   });
   describe('export, tag and export', () => {
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       helper.fixtures.populateComponents(1);
       helper.command.tagAllWithoutBuild();
       helper.command.export();
@@ -65,7 +64,7 @@ describe('export functionality on Harmony', function () {
     let anotherRemote;
     let exportOutput;
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       const { scopeName, scopePath } = helper.scopeHelper.getNewBareScope();
       anotherRemote = scopeName;
       helper.scopeHelper.addRemoteScope(scopePath);
@@ -82,7 +81,7 @@ describe('export functionality on Harmony', function () {
       exportOutput = helper.command.export();
     });
     it('should export them successfully with no errors', () => {
-      expect(exportOutput).to.have.string('exported the following 2 component');
+      expect(exportOutput).to.have.string('exported components (2)');
       const scope1 = helper.command.listRemoteScopeParsed();
       expect(scope1).to.have.lengthOf(1);
       const scope2 = helper.command.listRemoteScopeParsed(anotherRemote);
@@ -142,7 +141,7 @@ describe('export functionality on Harmony', function () {
       let beforeExportClone;
       before(() => {
         // simulate the same workspace the persist failed.
-        helper.scopeHelper.reInitLocalScope();
+        helper.scopeHelper.reInitWorkspace();
         helper.scopeHelper.addRemoteScope(remote1Path);
         helper.scopeHelper.addRemoteScope(remote2Path);
 
@@ -155,7 +154,7 @@ describe('export functionality on Harmony', function () {
         helper.command.linkAndRewire();
         helper.command.compile();
         helper.command.tagAllWithoutBuild();
-        beforeExportClone = helper.scopeHelper.cloneLocalScope();
+        beforeExportClone = helper.scopeHelper.cloneWorkspace();
       });
       describe('running bit export --resume <export-id>', () => {
         let exportOutput: string;
@@ -163,7 +162,7 @@ describe('export functionality on Harmony', function () {
           exportOutput = helper.command.export(`--resume ${exportId}`);
         });
         it('should resume the export and complete it successfully', () => {
-          expect(exportOutput).to.have.string('exported the following 2 component(s)');
+          expect(exportOutput).to.have.string('exported components (2)');
           expect(exportOutput).to.have.string('ovio1b1s-remote/bar1');
           expect(exportOutput).to.have.string('mjtjb8oh-remote2/bar2');
         });
@@ -176,7 +175,7 @@ describe('export functionality on Harmony', function () {
         before(() => {
           helper.scopeHelper.getClonedScope(remote1Clone, remote1Path);
           helper.scopeHelper.getClonedScope(remote2Clone, remote2Path);
-          helper.scopeHelper.getClonedLocalScope(beforeExportClone);
+          helper.scopeHelper.getClonedWorkspace(beforeExportClone);
         });
         it('should throw ServerIsBusy error', () => {
           const err = new ServerIsBusy(2, exportId);
@@ -189,19 +188,19 @@ describe('export functionality on Harmony', function () {
         before(() => {
           helper.scopeHelper.getClonedScope(remote1Clone, remote1Path);
           helper.scopeHelper.getClonedScope(remote2Clone, remote2Path);
-          helper.scopeHelper.getClonedLocalScope(beforeExportClone);
+          helper.scopeHelper.getClonedWorkspace(beforeExportClone);
           helper.command.resumeExport(exportId, [remote1Name]);
           exportOutput = helper.command.export(`--resume ${exportId}`);
         });
         it('should still be able to run export --resume to persist to other scopes', () => {
-          expect(exportOutput).to.have.string('exported the following 1 component(s)');
+          expect(exportOutput).to.have.string('exported components (1)');
           expect(exportOutput).to.have.string('mjtjb8oh-remote2/bar2');
         });
       });
     });
     describe('from different workspace, by running bit resume-export <export-id> <remotes...>', () => {
       before(() => {
-        helper.scopeHelper.reInitLocalScope();
+        helper.scopeHelper.reInitWorkspace();
         helper.scopeHelper.getClonedScope(remote1Clone, remote1Path);
         helper.scopeHelper.getClonedScope(remote2Clone, remote2Path);
         helper.scopeHelper.addRemoteScope(remote1Path);
@@ -250,7 +249,7 @@ describe('export functionality on Harmony', function () {
   // in this test, VersionHistory never got built (coz there was not any import).
   describe('when version history is out of date', () => {
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       helper.command.createLane('lane-a');
       helper.fixtures.populateComponents(1, false);
       helper.command.snapAllComponentsWithoutBuild();

@@ -1,26 +1,40 @@
 import { BitError } from '@teambit/bit-error';
-import { CLIAspect, CLIMain, MainRuntime } from '@teambit/cli';
+import type { CLIMain } from '@teambit/cli';
+import { CLIAspect, MainRuntime } from '@teambit/cli';
 import { importTransformer, exportTransformer } from '@teambit/typescript';
-import { ComponentAspect, Component, ComponentMain } from '@teambit/component';
-import { ComponentDependency, DependencyResolverAspect, DependencyResolverMain } from '@teambit/dependency-resolver';
-import { ComponentConfig } from '@teambit/generator';
-import { GraphqlAspect, GraphqlMain } from '@teambit/graphql';
+import type { Component, ComponentMain } from '@teambit/component';
+import { ComponentAspect } from '@teambit/component';
+import type { DependencyResolverMain } from '@teambit/dependency-resolver';
+import { ComponentDependency, DependencyResolverAspect } from '@teambit/dependency-resolver';
+import type { ComponentConfig } from '@teambit/generator';
+import type { GraphqlMain } from '@teambit/graphql';
+import { GraphqlAspect } from '@teambit/graphql';
 import { isHash } from '@teambit/component-version';
-import { InstallAspect, InstallMain } from '@teambit/install';
-import { ComponentID, ComponentIdObj, ComponentIdList } from '@teambit/component-id';
-import { NewComponentHelperAspect, NewComponentHelperMain } from '@teambit/new-component-helper';
-import { PkgAspect, PkgMain } from '@teambit/pkg';
-import { RefactoringAspect, MultipleStringsReplacement, RefactoringMain } from '@teambit/refactoring';
-import { WorkspaceAspect, OutsideWorkspaceError, Workspace } from '@teambit/workspace';
+import type { InstallMain } from '@teambit/install';
+import { InstallAspect } from '@teambit/install';
+import type { ComponentIdObj } from '@teambit/component-id';
+import { ComponentID, ComponentIdList } from '@teambit/component-id';
+import type { NewComponentHelperMain } from '@teambit/new-component-helper';
+import { NewComponentHelperAspect } from '@teambit/new-component-helper';
+import type { PkgMain } from '@teambit/pkg';
+import { PkgAspect } from '@teambit/pkg';
+import type { MultipleStringsReplacement, RefactoringMain } from '@teambit/refactoring';
+import { RefactoringAspect } from '@teambit/refactoring';
+import type { Workspace, WorkspaceComponentLoadOptions } from '@teambit/workspace';
+import { WorkspaceAspect, OutsideWorkspaceError } from '@teambit/workspace';
 import { snapToSemver } from '@teambit/component-package-version';
 import { uniqBy } from 'lodash';
 import pMapSeries from 'p-map-series';
 import { parse } from 'semver';
-import { ForkCmd, ForkOptions } from './fork.cmd';
+import type { ForkOptions } from './fork.cmd';
+import { ForkCmd } from './fork.cmd';
 import { ForkingAspect } from './forking.aspect';
 import { ForkingFragment } from './forking.fragment';
 import { forkingSchema } from './forking.graphql';
-import { ScopeForkCmd, ScopeForkOptions } from './scope-fork.cmd';
+import type { ScopeForkOptions } from './scope-fork.cmd';
+import { ScopeForkCmd } from './scope-fork.cmd';
+import type { ScopeMain } from '@teambit/scope';
+import { ScopeAspect } from '@teambit/scope';
 
 export type ForkInfo = {
   forkedFrom: ComponentID;
@@ -46,11 +60,13 @@ type MultipleForkOptions = {
   scope?: string; // different scope-name than the original components
   install?: boolean; // whether to run "bit install" once done.
   ast?: boolean; // whether to use AST to transform files instead of regex
+  compile?: boolean; // whether to compile the component after forking
 };
 
 export class ForkingMain {
   constructor(
     private workspace: Workspace,
+    private scope: ScopeMain,
     private install: InstallMain,
     private dependencyResolver: DependencyResolverMain,
     private newComponentHelper: NewComponentHelperMain,
@@ -66,7 +82,7 @@ export class ForkingMain {
   async fork(sourceId: string, targetId?: string, options?: ForkOptions): Promise<ComponentID> {
     if (!this.workspace) throw new OutsideWorkspaceError();
     const sourceCompId = await this.workspace.resolveComponentId(sourceId);
-    const exists = this.workspace.exists(sourceCompId);
+    const exists = this.workspace.hasId(sourceCompId, { ignoreVersion: true });
     if (exists) {
       const existingInWorkspace = await this.workspace.get(sourceCompId);
       return this.forkExistingInWorkspace(existingInWorkspace, targetId, options);
@@ -79,11 +95,124 @@ export class ForkingMain {
   }
 
   /**
+   * fork multiple components matching a pattern
+   * all components are forked with the same name to a target scope
+   */
+  async forkByPattern(pattern: string, options?: ForkOptions): Promise<ComponentID[]> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
+
+    const targetScope = options?.scope || this.workspace.defaultScope;
+
+    // Get workspace components matching the pattern
+    const workspaceIds = this.workspace.listIds();
+    const matchedWorkspaceIds = await this.workspace.filterIdsFromPoolIdsByPattern(pattern, workspaceIds, false);
+
+    // Get remote components matching the pattern
+    // Extract unique scope names from the pattern to query remote scopes
+    const scopeNames = this.extractScopeNamesFromPattern(pattern);
+    const remoteIds: ComponentID[] = [];
+
+    for (const scopeName of scopeNames) {
+      try {
+        const allIdsFromScope = await this.workspace.scope.listRemoteScope(scopeName);
+        if (allIdsFromScope.length > 0) {
+          const filtered = await this.workspace.scope.filterIdsFromPoolIdsByPattern(pattern, allIdsFromScope, false);
+          remoteIds.push(...filtered);
+        }
+      } catch {
+        // If the scope doesn't exist or can't be accessed, continue
+      }
+    }
+
+    const allMatchedIds = [...matchedWorkspaceIds, ...remoteIds];
+
+    if (!allMatchedIds.length) {
+      throw new BitError(`no components found matching pattern "${pattern}"`);
+    }
+
+    // Filter out components that would conflict with existing workspace components
+    const workspaceBitIds = ComponentIdList.fromArray(workspaceIds);
+    const idsToFork = allMatchedIds.filter((id) => {
+      const newComponentId = ComponentID.fromObject({ name: id.fullName }, targetScope);
+      const existInWorkspace = workspaceBitIds.searchWithoutVersion(newComponentId);
+      return !existInWorkspace;
+    });
+
+    if (!idsToFork.length) {
+      throw new BitError(
+        `all components matching pattern "${pattern}" already exist in the workspace with scope "${targetScope}"`
+      );
+    }
+
+    const forkedIds: ComponentID[] = [];
+
+    // Fork workspace components
+    const workspaceIdsToFork = idsToFork.filter((id) => matchedWorkspaceIds.some((wsId) => wsId.isEqual(id)));
+    for (const id of workspaceIdsToFork) {
+      const existing = await this.workspace.get(id);
+      const targetCompId = await this.forkExistingInWorkspace(existing, undefined, { ...options, scope: targetScope });
+      forkedIds.push(targetCompId);
+    }
+
+    // Fork remote components
+    const remoteIdsToFork = idsToFork.filter((id) => remoteIds.some((remoteId) => remoteId.isEqual(id)));
+    if (remoteIdsToFork.length > 0) {
+      const componentsToFork: MultipleComponentsToFork = remoteIdsToFork.map((id) => ({
+        sourceId: id.toString(),
+        targetScope,
+      }));
+
+      const results = await this.forkMultipleFromRemote(componentsToFork, {
+        refactor: options?.refactor,
+        scope: targetScope,
+        install: !options?.skipDependencyInstallation,
+        ast: options?.ast,
+        compile: false,
+      });
+
+      forkedIds.push(...results.map((result) => result.targetCompId));
+    }
+
+    return forkedIds;
+  }
+
+  /**
+   * Extract scope names from a pattern
+   * e.g., "org.scope/**" -> ["org.scope"]
+   * e.g., "org.scope/ui/**, org.scope2/backend/**" -> ["org.scope", "org.scope2"]
+   */
+  private extractScopeNamesFromPattern(pattern: string): string[] {
+    const patterns = pattern.split(',').map((p) => p.trim());
+    const scopeNames = new Set<string>();
+
+    for (const pat of patterns) {
+      // Skip negation patterns
+      if (pat.startsWith('!')) continue;
+      // Skip state filters
+      if (pat.startsWith('$')) continue;
+
+      const parts = pat.split('/');
+      const potentialScope = parts[0];
+
+      // Only add if it looks like a scope name (contains a dot or doesn't have wildcards)
+      if (
+        potentialScope &&
+        !potentialScope.includes('*') &&
+        (potentialScope.includes('.') || !potentialScope.includes('/'))
+      ) {
+        scopeNames.add(potentialScope);
+      }
+    }
+
+    return Array.from(scopeNames);
+  }
+
+  /**
    * get the forking data, such as the source where a component was forked from
    */
   getForkInfo(component: Component): ForkInfo | null {
     const forkConfig = component.state.aspects.get(ForkingAspect.id)?.config as ForkConfig | undefined;
-    if (!forkConfig) return null;
+    if (!forkConfig?.forkedFrom) return null;
     return {
       forkedFrom: ComponentID.fromObject(forkConfig.forkedFrom),
     };
@@ -97,6 +226,12 @@ export class ForkingMain {
       async ({ sourceId, targetId, path, env, config, targetScope }) => {
         const sourceCompId = await this.workspace.resolveComponentId(sourceId);
         const sourceIdWithScope = sourceCompId._legacy.scope ? sourceCompId : ComponentID.fromString(sourceId);
+        const loadOptions: WorkspaceComponentLoadOptions = {
+          executeLoadSlot: false,
+          loadExtensions: false,
+          loadSeedersAsAspects: false,
+        };
+
         const { targetCompId, component } = await this.forkRemoteComponent(
           sourceIdWithScope,
           targetId,
@@ -105,6 +240,8 @@ export class ForkingMain {
             path,
             env,
             config,
+            compile: options.compile,
+            loadOptions,
           },
           false
         );
@@ -112,6 +249,7 @@ export class ForkingMain {
       }
     );
     await this.refactorMultipleAndInstall(results, options);
+    return results;
   }
 
   /**
@@ -136,7 +274,11 @@ export class ForkingMain {
         oldPackages.push(oldPackageName);
         const newName = targetCompId.fullName.replace(/\//g, '.');
         const scopeToReplace = targetCompId.scope.replace('.', '/');
-        const newPackageName = `@${scopeToReplace}.${newName}`;
+        // for locally hosted, the scope has no "/", so the package name would be "@scope/name".
+        // for the cloud, the package name would be "@org.scope/name".
+        const newPackageName = scopeToReplace.includes('/')
+          ? `@${scopeToReplace}.${newName}`
+          : `@${scopeToReplace}/${newName}`;
         return [
           { oldStr: oldPackageName, newStr: newPackageName },
           { oldStr: sourceId, newStr: targetCompId.toStringWithoutVersion() },
@@ -186,18 +328,24 @@ export class ForkingMain {
    */
   async forkScope(
     originalScope: string,
-    newScope: string,
+    newOptionalScope?: string, // if not specified, it'll be the default scope
     pattern?: string,
     options?: ScopeForkOptions
   ): Promise<ComponentID[]> {
+    if (!this.workspace) throw new OutsideWorkspaceError();
+    const newScope = newOptionalScope || this.workspace.defaultScope;
     const allIdsFromOriginalScope = await this.workspace.scope.listRemoteScope(originalScope);
     if (!allIdsFromOriginalScope.length) {
       throw new Error(`unable to find components to fork from ${originalScope}`);
     }
     const getPatternWithScopeName = () => {
       if (!pattern) return undefined;
-      if (pattern.startsWith(`${originalScope}/`)) return pattern;
-      return `${originalScope}/${pattern}`;
+      const patterns = pattern.split(',').map((p) => p.trim());
+      const patternsWithScope = patterns.map((p) => {
+        if (p.startsWith(`${originalScope}/`)) return p;
+        return `${originalScope}/${p}`;
+      });
+      return patternsWithScope.join(', ');
     };
     const patternWithScopeName = getPatternWithScopeName();
     const idsFromOriginalScope = patternWithScopeName
@@ -218,7 +366,15 @@ export class ForkingMain {
     await pMapSeries(components, async (component) => {
       const config = await this.getConfig(component);
       const targetCompId = ComponentID.fromObject({ name: component.id.fullName }, newScope);
-      await this.newComponentHelper.writeAndAddNewComp(component, targetCompId, { scope: newScope }, config);
+      await this.newComponentHelper.writeAndAddNewComp(
+        component,
+        targetCompId,
+        {
+          scope: newScope,
+          incrementPathIfConflicted: true,
+        },
+        config
+      );
       multipleForkInfo.push({ targetCompId, sourceId: component.id.toStringWithoutVersion(), component });
     });
     await this.refactorMultipleAndInstall(multipleForkInfo, {
@@ -243,7 +399,7 @@ export class ForkingMain {
     return targetCompId;
   }
 
-  private async forkRemoteComponent(
+  async forkRemoteComponent(
     sourceId: ComponentID,
     targetId?: string,
     options?: ForkOptions,
@@ -258,7 +414,7 @@ the reason is that the refactor changes the components using ${sourceId.toString
     }
     const targetName = targetId || sourceId.fullName;
     const targetCompId = this.newComponentHelper.getNewComponentId(targetName, undefined, options?.scope);
-    const component = await this.workspace.scope.getRemoteComponent(sourceId);
+    const component = await this.scope.getRemoteComponent(sourceId);
     await this.refactoring.replaceMultipleStrings(
       [component],
       [
@@ -276,7 +432,9 @@ the reason is that the refactor changes the components using ${sourceId.toString
       this.refactoring.refactorFilenames(component, sourceId, targetCompId);
     }
     const config = await this.getConfig(component, options);
-    await this.newComponentHelper.writeAndAddNewComp(component, targetCompId, options, config);
+    if (this.workspace) {
+      await this.newComponentHelper.writeAndAddNewComp(component, targetCompId, options, config);
+    }
 
     return { targetCompId, component };
   }
@@ -343,6 +501,7 @@ the reason is that the refactor changes the components using ${sourceId.toString
   static dependencies = [
     CLIAspect,
     WorkspaceAspect,
+    ScopeAspect,
     DependencyResolverAspect,
     ComponentAspect,
     NewComponentHelperAspect,
@@ -355,6 +514,7 @@ the reason is that the refactor changes the components using ${sourceId.toString
   static async provider([
     cli,
     workspace,
+    scope,
     dependencyResolver,
     componentMain,
     newComponentHelper,
@@ -365,17 +525,26 @@ the reason is that the refactor changes the components using ${sourceId.toString
   ]: [
     CLIMain,
     Workspace,
+    ScopeMain,
     DependencyResolverMain,
     ComponentMain,
     NewComponentHelperMain,
     GraphqlMain,
     RefactoringMain,
     PkgMain,
-    InstallMain
+    InstallMain,
   ]) {
-    const forkingMain = new ForkingMain(workspace, install, dependencyResolver, newComponentHelper, refactoring, pkg);
+    const forkingMain = new ForkingMain(
+      workspace,
+      scope,
+      install,
+      dependencyResolver,
+      newComponentHelper,
+      refactoring,
+      pkg
+    );
     cli.register(new ForkCmd(forkingMain));
-    graphql.register(forkingSchema(forkingMain));
+    graphql.register(() => forkingSchema(forkingMain));
     componentMain.registerShowFragments([new ForkingFragment(forkingMain)]);
 
     const scopeCommand = cli.getCommand('scope');

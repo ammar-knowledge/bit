@@ -1,5 +1,8 @@
 import chalk from 'chalk';
-import { SchemaLocation, SchemaNode } from '../schema-node';
+import type { SchemaLocation } from '../schema-node';
+import { SchemaNode } from '../schema-node';
+import type { SchemaChangeFact } from '../schema-diff';
+import { diffMembers } from '../schema-diff-members';
 import { DocSchema } from './docs';
 import { ExpressionWithTypeArgumentsSchema } from './expression-with-arguments';
 import { SchemaRegistry } from '../schema-registry';
@@ -26,9 +29,47 @@ export class InterfaceSchema extends SchemaNode {
     return this.members;
   }
 
-  toString() {
-    const membersStr = this.members.map((m) => `* ${m.toString()}`).join('\n');
-    return `${chalk.bold.underline(this.name)}\n${membersStr}`;
+  toString(options?: { color?: boolean }): string {
+    const boldUnderline = options?.color ? chalk.bold.underline : (str: string) => str;
+    const membersStr = this.members.map((m) => `* ${m.toString(options)}`).join('\n');
+    return `${boldUnderline(this.name)}\n${membersStr}`;
+  }
+
+  toFullSignature(options?: { showDocs?: boolean }): string {
+    let result = '';
+
+    if (options?.showDocs && this.doc) {
+      result += `${this.doc.toFullSignature()}\n`;
+    }
+
+    let interfaceDeclaration = `interface ${this.name}`;
+
+    if (this.typeParams && this.typeParams.length > 0) {
+      interfaceDeclaration += `<${this.typeParams.join(', ')}>`;
+    }
+
+    if (this.extendsNodes && this.extendsNodes.length > 0) {
+      const extendsStr = this.extendsNodes.map((node) => node.toFullSignature(options)).join(', ');
+      interfaceDeclaration += ` extends ${extendsStr}`;
+    }
+
+    result += `${interfaceDeclaration} {\n`;
+
+    const membersStr = this.members
+      .map((member) => {
+        const memberStr = member.toFullSignature(options);
+        return memberStr
+          .split('\n')
+          .map((line) => `  ${line}`)
+          .join('\n');
+      })
+      .join('\n');
+
+    result += `${membersStr}\n`;
+
+    result += `}`;
+
+    return result;
   }
 
   toObject() {
@@ -41,6 +82,11 @@ export class InterfaceSchema extends SchemaNode {
       extendsNodes: this.extendsNodes?.map((node) => node.toObject()),
       typeParams: this.typeParams,
     };
+  }
+
+  diff(other: SchemaNode): SchemaChangeFact[] {
+    if (!(other instanceof InterfaceSchema)) return super.diff(other);
+    return diffMembers(this.toObject(), other.toObject(), this, other);
   }
 
   static fromObject(obj: Record<string, any>): InterfaceSchema {

@@ -1,13 +1,14 @@
 /* eslint-disable max-classes-per-file */
 import chalk from 'chalk';
 import yesno from 'yesno';
-import { Command, CommandOptions, Flags } from '@teambit/cli';
-import { CloudMain } from './cloud.main.runtime';
+import type { Command, CommandOptions, Flags } from '@teambit/cli';
+import { formatSuccessSummary } from '@teambit/cli';
+import type { CloudMain } from './cloud.main.runtime';
 
 export class NpmrcGenerateCmd implements Command {
   name = 'generate';
   description = 'update npmrc file with scope, registry, and token information from bit.cloud';
-  group = 'cloud';
+  group = 'auth';
   alias = '';
   options = [
     ['', 'dry-run', 'show the .npmrc file content that will be written'],
@@ -17,7 +18,10 @@ export class NpmrcGenerateCmd implements Command {
 
   private port?: string;
 
-  constructor(private cloud: CloudMain, _port?: number) {
+  constructor(
+    private cloud: CloudMain,
+    _port?: number
+  ) {
     this.port = _port?.toString();
   }
 
@@ -49,7 +53,7 @@ export class NpmrcGenerateCmd implements Command {
     if (updateResult.conflicts && updateResult.conflicts.length > 0) {
       return this.handleNpmrcConflicts(updateResult.conflicts);
     }
-    return chalk.green('The .npmrc file has been updated successfully.');
+    return formatSuccessSummary('The .npmrc file has been updated successfully.');
   }
 
   async json() {
@@ -81,14 +85,17 @@ Modification: ${chalk.green(conflict.modifications)}`
       return chalk.red('Updating .npmrc was aborted due to conflicts.');
     }
     await this.cloud.generateNpmrc({ force: true });
-    return chalk.green('.npmrc has been updated successfully after resolving conflicts.');
+    return formatSuccessSummary('.npmrc has been updated after resolving conflicts.');
   }
 }
 
 export class NpmrcCmd implements Command {
   name = 'npmrc [sub-command]';
-  description = 'manage npmrc file with scope, registry, and token information from bit.cloud';
-  group = 'cloud';
+  description = 'configure .npmrc file with Bit Cloud registry and authentication settings';
+  extendedDescription = `manages .npmrc configuration for seamless package installation from Bit Cloud registries.
+automatically configures scoped registries and authentication tokens for your workspace components.
+provides sub-commands for generating, updating, and managing npm registry configurations.`;
+  group = 'auth';
   alias = '';
   options = [];
   loader = true;

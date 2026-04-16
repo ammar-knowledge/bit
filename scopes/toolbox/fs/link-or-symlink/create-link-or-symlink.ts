@@ -3,7 +3,8 @@ import { platform } from 'os';
 import fsNative from 'fs';
 import { BitError } from '@teambit/bit-error';
 import * as path from 'path';
-import logger from '@teambit/legacy/dist/logger/logger';
+import { logger } from '@teambit/legacy.logger';
+import symlinkDir from 'symlink-dir';
 
 /**
  * create a link (hard-link). if not possible (e.g. it's a directory) or avoidHardLink is true, use symlink.
@@ -38,6 +39,12 @@ export function createLinkOrSymlink(
     if (avoidHardLink) symlink();
     else link();
   } catch (err: any) {
+    if (err.code === 'EEXIST' && isDestLinkedCorrectly(srcPath, destPath)) {
+      logger.trace(
+        `createLinkOrSymlink, EEXIST but destination already points to the correct source, skipping. dest: ${destPath}`
+      );
+      return;
+    }
     const winMsg = IS_WINDOWS ? ' (or maybe copy)' : '';
     const errorHeader = componentId ? `failed to link a component ${componentId}` : 'failed to generate a symlink';
     throw new BitError(`${errorHeader}.
@@ -47,7 +54,7 @@ Original error: ${err}`);
   }
 
   function symlink() {
-    IS_WINDOWS ? symlinkOrHardLink() : fs.symlinkSync(srcPath, destPath);
+    IS_WINDOWS ? symlinkOrHardLink() : symlinkDir.sync(srcPath, destPath);
   }
 
   /**
@@ -55,9 +62,11 @@ Original error: ${err}`);
    */
   function symlinkOrHardLink() {
     try {
-      fs.symlinkSync(srcPath, destPath);
+      symlinkDir.sync(srcPath, destPath, {
+        noJunction: true,
+      });
       logger.trace(`createLinkOrSymlink, symlinkOrHardLink() successfully created the symlink`);
-    } catch (err: any) {
+    } catch {
       // it can be a file or directory, we don't know. just run link(), it will junction for dirs and hard-link for files.
       link();
     }
@@ -121,6 +130,19 @@ Original error: ${err}`);
       }
     }
   }
+}
+
+function isDestLinkedCorrectly(src: string, dest: string): boolean {
+  try {
+    const srcStat = fs.statSync(src);
+    const destStat = fs.statSync(dest);
+    // covers both hard links (same inode) and symlinks (stat follows the symlink).
+    // guard against zero values — on Windows ino/dev can be 0, which would cause false positives.
+    if (srcStat.ino !== 0 && srcStat.ino === destStat.ino && srcStat.dev === destStat.dev) return true;
+  } catch {
+    // ignore
+  }
+  return linkPointsToPath(dest, src);
 }
 
 function linkPointsToPath(linkPath: string, expectedPath: string) {

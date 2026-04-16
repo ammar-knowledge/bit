@@ -1,10 +1,18 @@
 import { BitError } from '@teambit/bit-error';
-import { Command, CommandOptions } from '@teambit/cli';
-import { COMPONENT_PATTERN_HELP } from '@teambit/legacy/dist/constants';
-import { Logger } from '@teambit/logger';
-import openBrowser from 'react-dev-utils/openBrowser';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { Logger } from '@teambit/logger';
+import open from 'open';
 import chalk from 'chalk';
 import type { UiMain } from './ui.main.runtime';
+
+function openBrowser(url: string): Promise<void> {
+  const openUrl =
+    process.env.BIT_VSCODE_EXTENSION === 'true'
+      ? `vscode://bit.vscode-bit/open-browser?url=${encodeURIComponent(url)}`
+      : url;
+  return open(openUrl).then(() => undefined);
+}
 
 type StartArgs = [userPattern: string];
 type StartFlags = {
@@ -12,15 +20,20 @@ type StartFlags = {
   port: string;
   rebuild: boolean;
   verbose: boolean;
+  showInternalUrls: boolean;
   noBrowser: boolean;
   skipCompilation: boolean;
   skipUiBuild: boolean;
   uiRootName: string;
+  useRootModules: boolean;
 };
 
 export class StartCmd implements Command {
   name = 'start [component-pattern]';
-  description = 'run the ui/development server';
+  description = 'launch the Bit development server';
+  extendedDescription = `starts the local development server providing a UI to browse, preview, and interact with components.
+works in both workspaces and scopes. opens automatically in your browser at http://localhost:3000 (or specified port).
+includes hot module reloading for development.`;
   arguments = [
     {
       name: 'component-pattern',
@@ -28,7 +41,7 @@ export class StartCmd implements Command {
     },
   ];
   alias = 'c';
-  group = 'development';
+  group = 'run-serve';
   options = [
     ['d', 'dev', 'start UI server in dev mode.'],
     ['p', 'port [port-number]', 'port of the UI server.'],
@@ -40,11 +53,17 @@ export class StartCmd implements Command {
     ['', 'skip-ui-build', 'skip building UI'],
     ['v', 'verbose', 'show verbose output for inspection and prints stack trace'],
     ['n', 'no-browser', 'do not automatically open browser when ready'],
+    ['', 'show-internal-urls', 'show urls for all internal dev servers'],
     ['', 'skip-compilation', 'skip the auto-compilation before starting the web-server'],
     [
       'u',
       'ui-root-name [type]',
       'name of the ui root to use, e.g. "teambit.scope/scope" or "teambit.workspace/workspace"',
+    ],
+    [
+      '',
+      'use-root-modules',
+      'EXPERIMENTAL. resolve component previews from root node_modules instead of .bit_roots. mainly for internal usage, use with caution only if you understand the implications',
     ],
   ] as CommandOptions;
 
@@ -67,7 +86,9 @@ export class StartCmd implements Command {
       noBrowser,
       skipCompilation,
       skipUiBuild,
+      showInternalUrls,
       uiRootName: uiRootAspectIdOrName,
+      useRootModules,
     }: StartFlags
   ) {
     const spinnies = this.logger.multiSpinner;
@@ -90,25 +111,32 @@ export class StartCmd implements Command {
       port: +port,
       rebuild,
       verbose,
+      showInternalUrls,
+      useRootModules,
     });
 
     uiServer
       .then(async (server) => {
-        if (!server.buildOptions?.launchBrowserOnStart) return undefined;
         const url = this.ui.publicUrl || server.fullUrl;
+        spinnies.succeed('ui-server', { text: `UI server ready ${chalk.dim('\u2192')} ${chalk.cyan(url)}` });
+        if (!server.buildOptions?.launchBrowserOnStart) return undefined;
 
-        spinnies.succeed('ui-server', { text: `UI server is ready at ${chalk.cyan(url)}` });
         await server.whenReady;
         const name = server.getName();
-        const message = chalk.green(`You can now view '${chalk.cyan(name)}' components in the browser.
-Bit server is running on ${chalk.cyan(url)}`);
+        const message = chalk.green(`\nView '${chalk.bold(name)}' components at ${chalk.cyan(url)}`);
         spinnies.add('summary', { text: message, status: 'non-spinnable' });
         if (!noBrowser) {
-          openBrowser(url);
+          await openBrowser(url);
         }
         return undefined;
       })
-      .catch((error) => this.logger.error(error));
+      .catch((error) => {
+        this.logger.error(`failed to start the UI server`, error);
+        // spinnies.fail('ui-server', { text: `failed to start the UI server. ${error.message}` });
+        throw new Error(
+          'failed to start the UI server, please try running the command with --log flag, or check bit debug.log file (see its location by running bit globals)'
+        );
+      });
 
     // DO NOT CHANGE THIS - this meant to be an async hook.
     // eslint-disable-next-line @typescript-eslint/no-floating-promises

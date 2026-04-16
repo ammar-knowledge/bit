@@ -1,18 +1,30 @@
-import { Command, CommandOptions } from '@teambit/cli';
-import chalk from 'chalk';
-import { compact, uniq } from 'lodash';
-import { installationErrorOutput, compilationErrorOutput, getWorkspaceConfigUpdateOutput } from '@teambit/merging';
+import type { Command, CommandOptions } from '@teambit/cli';
 import {
+  formatSection,
+  formatItem,
+  formatTitle,
+  formatHint,
+  formatSuccessSummary,
+  warnSymbol,
+  errorSymbol,
+  joinSections,
+} from '@teambit/cli';
+import chalk from 'chalk';
+import { uniq } from 'lodash';
+import type { MergeStrategy } from '@teambit/component.modules.merge-helper';
+import {
+  installationErrorOutput,
+  compilationErrorOutput,
+  getWorkspaceConfigUpdateOutput,
   FileStatus,
   MergeOptions,
-  MergeStrategy,
-} from '@teambit/legacy/dist/consumer/versions-ops/merge-version/merge-version';
-import { ComponentIdList, ComponentID } from '@teambit/component-id';
+} from '@teambit/component.modules.merge-helper';
+import type { ComponentID } from '@teambit/component-id';
+import { ComponentIdList } from '@teambit/component-id';
 import { BitError } from '@teambit/bit-error';
-import { immutableUnshift } from '@teambit/legacy/dist/utils';
-import { formatPlainComponentItem } from '@teambit/legacy/dist/cli/chalk-box';
-import { ImporterMain } from './importer.main.runtime';
-import { ImportOptions, ImportDetails, ImportStatus, ImportResult } from './import-components';
+
+import type { ImporterMain } from './importer.main.runtime';
+import type { ImportOptions, ImportDetails, ImportStatus, ImportResult } from './import-components';
 
 type ImportFlags = {
   path?: string;
@@ -28,19 +40,24 @@ type ImportFlags = {
   filterEnvs?: string;
   saveInLane?: boolean;
   dependencies?: boolean;
+  dependenciesHead?: boolean;
   dependents?: boolean;
   dependentsDryRun?: boolean;
   dependentsVia?: string;
+  dependentsAll?: boolean;
   silent?: boolean;
   allHistory?: boolean;
   fetchDeps?: boolean;
   trackOnly?: boolean;
   includeDeprecated?: boolean;
+  writeDeps?: 'package.json' | 'workspace.jsonc';
+  laneOnly?: boolean;
+  owner?: boolean;
 };
 
 export class ImportCmd implements Command {
   name = 'import [component-patterns...]';
-  description = 'import components from their remote scopes to the local workspace';
+  description = 'bring components from remote scopes into your workspace';
   helpUrl = 'reference/components/importing-components';
   arguments = [
     {
@@ -49,7 +66,9 @@ export class ImportCmd implements Command {
         'component IDs or component patterns (separated by space). Use patterns to import groups of components using a common scope or namespace. E.g., "utils/*" (wrap with double quotes)',
     },
   ];
-  extendedDescription: string;
+  extendedDescription = `brings component source files from remote scopes into your workspace and installs their dependencies as packages.
+supports pattern matching for bulk imports, merge strategies for handling conflicts, and various optimization options.
+without arguments, fetches all workspace components' latest versions from their remote scopes.`;
   group = 'collaborate';
   alias = '';
   options = [
@@ -75,6 +94,7 @@ export class ImportCmd implements Command {
       'dependencies',
       'import all dependencies (bit components only) of imported components and write them to the workspace',
     ],
+    ['', 'dependencies-head', 'same as --dependencies, except it imports the dependencies with their head version'],
     [
       '',
       'dependents',
@@ -84,6 +104,11 @@ export class ImportCmd implements Command {
       '',
       'dependents-via <string>',
       'same as --dependents except the traversal must go through the specified component. to specify multiple components, wrap with quotes and separate by a comma',
+    ],
+    [
+      '',
+      'dependents-all',
+      'same as --dependents except not prompting for selecting paths but rather selecting all paths and showing final confirmation before importing',
     ],
     [
       '',
@@ -113,10 +138,21 @@ export class ImportCmd implements Command {
     ],
     [
       '',
+      'write-deps <target>',
+      'write all workspace component dependencies to the specified target ("package.json" or "workspace.jsonc"), resolving conflicts by picking the ranges that match the highest versions',
+    ],
+    [
+      '',
       'track-only',
       'do not write any component files, just create .bitmap entries of the imported components. Useful when the files already exist and just want to re-add the component to the bitmap',
     ],
     ['', 'include-deprecated', 'when importing with patterns, include deprecated components (default to exclude them)'],
+    [
+      '',
+      'lane-only',
+      'when using wildcards on a lane, only import components that exist on the lane (never from main)',
+    ],
+    ['', 'owner', 'treat the argument as an owner name and import all components from all scopes of that owner'],
   ] as CommandOptions;
   loader = true;
   remoteOp = true;
@@ -146,48 +182,61 @@ export class ImportCmd implements Command {
         : `successfully imported ${importedIdsUniqNoVersion.length} components`;
 
     let upToDateCount = 0;
-    const importedComponents = importedIds.map((bitId) => {
-      const details = importDetails.find((c) => c.id === bitId.toStringWithoutVersion());
-      if (!details) throw new Error(`missing details for component ${bitId.toString()}`);
-      if (details.status === 'up to date') {
-        upToDateCount += 1;
-      }
-      return formatPlainComponentItemWithVersions(bitId, details);
-    });
+    const importedComponents = importedIds
+      .map((bitId) => {
+        const details = importDetails.find((c) => c.id === bitId.toStringWithoutVersion());
+        if (!details) throw new Error(`missing details for component ${bitId.toString()}`);
+        if (details.status === 'up to date') {
+          upToDateCount += 1;
+        }
+        return formatPlainComponentItemWithVersions(bitId, details);
+      })
+      .filter(Boolean) as string[];
+
     const getWsConfigUpdateLogs = () => {
-      // @TODO: uncomment the line below once UPDATE_DEPS_ON_IMPORT is enabled by default
-      // if (!importFlags.verbose) return '';
       const logs = workspaceConfigUpdateResult?.logs;
       if (!logs || !logs.length) return '';
       const logsStr = logs.join('\n');
-      return `${chalk.underline(
-        'verbose logs of workspace config update'
-      )}\n(this is temporarily. once this feature is enabled, use --verbose to see these logs)\n${logsStr}`;
+      return `${formatTitle('verbose logs of workspace config update')}\n${logsStr}`;
     };
     const upToDateSuffix = lane ? ' on the lane' : '';
     const upToDateStr = upToDateCount === 0 ? '' : `, ${upToDateCount} components are up to date${upToDateSuffix}`;
     const summary = `${summaryPrefix}${upToDateStr}`;
-    const importOutput = compact(importedComponents).join('\n');
+
+    const importOutput = importedComponents.length ? formatSection('imported components', '', importedComponents) : '';
+
     const importedDepsOutput =
       importFlags.displayDependencies && importedDeps.length
-        ? immutableUnshift(
-            uniq(importedDeps.map(formatPlainComponentItem)),
-            chalk.green(`\n\nsuccessfully imported ${importedDeps.length} component dependencies`)
-          ).join('\n')
+        ? formatSection('imported component dependencies', '', uniq(importedDeps.map(formatPlainComponentItem)))
         : '';
 
-    const output = compact([
+    const getRemovedWarning = () => {
+      const removedDetails = importDetails.filter((d) => d.removed);
+      if (!removedDetails.length) return '';
+      const removedItems = removedDetails.map((d) => formatItem(chalk.bold(d.id), errorSymbol));
+      const hintBase = `run "bit recover <component-id>" to restore`;
+      const hintSuffix = lane ? `, then "bit lane merge main" to get latest updates` : '';
+      return joinSections([
+        formatSection(
+          'deleted components',
+          'imported component(s) are marked as deleted and may not be up to date',
+          removedItems
+        ),
+        formatHint(`${hintBase}${hintSuffix}`),
+      ]);
+    };
+
+    return joinSections([
       getWsConfigUpdateLogs(),
       importOutput,
       importedDepsOutput,
       formatMissingComponents(missingIds),
+      getRemovedWarning(),
       getWorkspaceConfigUpdateOutput(workspaceConfigUpdateResult),
       installationErrorOutput(installationError),
       compilationErrorOutput(compilationError),
-      chalk.green(summary),
-    ]).join('\n\n');
-
-    return output;
+      formatSuccessSummary(summary),
+    ]);
   }
 
   async json([ids]: [string[]], importFlags: ImportFlags) {
@@ -210,14 +259,19 @@ export class ImportCmd implements Command {
       filterEnvs,
       saveInLane = false,
       dependencies = false,
+      dependenciesHead = false,
       dependents = false,
       dependentsDryRun = false,
       silent,
       dependentsVia,
+      dependentsAll,
       allHistory = false,
       fetchDeps = false,
       trackOnly = false,
       includeDeprecated = false,
+      writeDeps,
+      laneOnly = false,
+      owner = false,
     }: ImportFlags
   ): Promise<ImportResult> {
     if (dependentsDryRun) {
@@ -232,6 +286,9 @@ export class ImportCmd implements Command {
     if (!ids.length && dependencies) {
       throw new BitError('you have to specify ids to use "--dependencies" flag');
     }
+    if (!ids.length && dependenciesHead) {
+      throw new BitError('you have to specify ids to use "--dependencies-head" flag');
+    }
     if (!ids.length && dependents) {
       throw new BitError('you have to specify ids to use "--dependents" flag');
     }
@@ -240,6 +297,9 @@ export class ImportCmd implements Command {
     }
     if (!ids.length && trackOnly) {
       throw new BitError('you have to specify ids to use "--track-only" flag');
+    }
+    if (owner && ids.length !== 1) {
+      throw new BitError('--owner flag requires exactly one argument (the owner name)');
     }
     let mergeStrategy;
     if (merge && typeof merge === 'string') {
@@ -266,13 +326,18 @@ export class ImportCmd implements Command {
       writeConfigFiles: !skipWriteConfigFiles,
       saveInLane,
       importDependenciesDirectly: dependencies,
+      importHeadDependenciesDirectly: dependenciesHead,
       importDependents: dependents,
       dependentsVia,
+      dependentsAll,
       silent,
       allHistory,
       fetchDeps,
       trackOnly,
       includeDeprecated,
+      writeDeps,
+      laneOnly,
+      owner,
     };
     return this.importer.import(importOptions, this._packageManagerArgs);
   }
@@ -280,25 +345,36 @@ export class ImportCmd implements Command {
 
 function formatMissingComponents(missing?: string[]) {
   if (!missing?.length) return '';
-  const title = chalk.underline('Missing Components');
-  const subTitle = `The following components are missing from the remote in the requested version, try running "bit status" to re-sync your .bitmap file
-Also, check that the requested version exists on main or the checked out lane`;
-  const body = chalk.red(missing.join('\n'));
-  return `${title}\n${subTitle}\n${body}`;
+  const desc = `the following components are missing from the remote in the requested version, try running "bit status" to re-sync your .bitmap file\nalso, check that the requested version exists on main or the checked out lane`;
+  const items = missing.map((id) => formatItem(chalk.red(id), errorSymbol));
+  return formatSection('missing components', desc, items);
 }
 
-function formatPlainComponentItemWithVersions(bitId: ComponentID, importDetails: ImportDetails) {
+function formatPlainComponentItem({ scope, name, version, deprecated }: any) {
+  const id = `${scope ? `${scope}/` : ''}${name}@${version ? version.toString() : 'latest'}`;
+  const suffix = deprecated ? ` ${chalk.yellow('[deprecated]')}` : '';
+  return formatItem(chalk.cyan(id) + suffix);
+}
+
+function formatPlainComponentItemWithVersions(bitId: ComponentID, importDetails: ImportDetails): string | undefined {
   const status: ImportStatus = importDetails.status;
   const id = bitId.toStringWithoutVersion();
+  let usingLatest = '';
   const getVersionsOutput = () => {
     if (!importDetails.versions.length) return '';
     if (importDetails.latestVersion) {
+      if (importDetails.latestVersion === bitId.version && status === 'added') {
+        usingLatest = ' (latest)';
+        return '';
+      }
       return `${importDetails.versions.length} new version(s) available, latest ${importDetails.latestVersion}`;
     }
-    return `new versions: ${importDetails.versions.join(', ')}`;
+    return importDetails.versions.length > 5
+      ? `${importDetails.versions.length} new versions`
+      : `new versions: ${importDetails.versions.join(', ')}`;
   };
   const versions = getVersionsOutput();
-  const usedVersion = status === 'added' ? `, currently used version ${bitId.version}` : '';
+  const usedVersion = status === 'added' ? `currently used version ${bitId.version}${usingLatest}` : '';
   const getConflictMessage = () => {
     if (!importDetails.filesStatus) return '';
     const conflictedFiles = Object.keys(importDetails.filesStatus)
@@ -311,16 +387,19 @@ function formatPlainComponentItemWithVersions(bitId: ComponentID, importDetails:
   };
   const conflictMessage = getConflictMessage();
   const deprecated = importDetails.deprecated && !importDetails.removed ? chalk.yellow('deprecated') : '';
-  const removed = importDetails.removed ? chalk.red('removed') : '';
+  const removed = importDetails.removed ? chalk.red('deleted') : '';
   const missingDeps = importDetails.missingDeps.length
     ? chalk.red(`missing dependencies: ${importDetails.missingDeps.map((d) => d.toString()).join(', ')}`)
     : '';
   if (status === 'up to date' && !missingDeps && !deprecated && !conflictMessage && !removed) {
     return undefined;
   }
-  return chalk.dim(
-    `- ${chalk.green(status)} ${chalk.cyan(
-      id
-    )} ${versions}${usedVersion} ${conflictMessage}${deprecated}${removed} ${missingDeps}`
-  );
+
+  const symbol = removed ? errorSymbol : deprecated ? warnSymbol : undefined;
+  const versionOutput = [versions, usedVersion].filter(Boolean).join(', ');
+  const stateOutput = `${conflictMessage}${deprecated}${removed}`;
+  const details = [chalk.green(status), chalk.cyan(id), versionOutput, stateOutput, missingDeps]
+    .filter(Boolean)
+    .join(' ');
+  return formatItem(chalk.dim(details), symbol);
 }

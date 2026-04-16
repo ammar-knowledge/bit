@@ -1,14 +1,15 @@
-import { TimerResponse, Timer } from '@teambit/legacy/dist/toolbox/timer';
-import { COMPONENT_PATTERN_HELP } from '@teambit/legacy/dist/constants';
-import { Command, CommandOptions } from '@teambit/cli';
-import { ComponentFactory, ComponentID } from '@teambit/component';
-import chalk from 'chalk';
-import { EnvsExecutionResult } from '@teambit/envs';
-import { Workspace } from '@teambit/workspace';
+import type { TimerResponse } from '@teambit/toolbox.time.timer';
+import { Timer } from '@teambit/toolbox.time.timer';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatTitle, formatItem, formatSuccessSummary, formatHint, errorSymbol, joinSections } from '@teambit/cli';
+import type { ComponentFactory, ComponentID } from '@teambit/component';
+import type { EnvsExecutionResult } from '@teambit/envs';
+import type { Workspace } from '@teambit/workspace';
 import { compact, flatten } from 'lodash';
-import { FormatterMain } from './formatter.main.runtime';
-import { ComponentFormatResult, FormatResults, FileFormatResult } from './formatter';
-import { FormatterOptions } from './formatter-context';
+import type { FormatterMain } from './formatter.main.runtime';
+import type { ComponentFormatResult, FormatResults, FileFormatResult } from './formatter';
+import type { FormatterOptions } from './formatter-context';
 
 export type FormatCmdOptions = {
   changed?: boolean;
@@ -40,9 +41,12 @@ export type JsonFormatResults = {
 
 export class FormatCmd implements Command {
   name = 'format [component-pattern]';
-  description = 'format components in the development workspace';
+  description = 'auto-format component source code';
+  extendedDescription = `formats component files using the formatter configured by each component's environment (Prettier, etc.).
+by default formats all components. use --changed to format only new and modified components.
+supports check mode to verify formatting without making changes.`;
   arguments = [{ name: 'component-pattern', description: COMPONENT_PATTERN_HELP }];
-  group = 'development';
+  group = 'testing';
   helpUrl = 'reference/formatting/formatter-overview';
   options = [
     ['c', 'changed', 'format only new and modified components'],
@@ -59,21 +63,17 @@ export class FormatCmd implements Command {
   async report([pattern]: [string], formatterOptions: FormatCmdOptions) {
     const { duration, data, code, componentsIdsToFormat } = await this.json([pattern], formatterOptions);
 
-    const title = chalk.bold(
-      `formatting total of ${chalk.cyan(
-        componentsIdsToFormat.length.toString()
-      )} component(s) in workspace '${chalk.cyan(this.componentHost.name)}`
+    const title = formatTitle(
+      `formatting total of ${componentsIdsToFormat.length} component(s) in workspace '${this.componentHost.name}'`
     );
 
     const componentsOutputs = this.getAllComponentsResultOutput(data.results, { check: formatterOptions.check });
 
     const { seconds } = duration;
-    const summery = `formatted ${chalk.cyan(componentsIdsToFormat.length.toString())} components in ${chalk.cyan(
-      seconds.toString()
-    )}.`;
+    const summary = formatHint(`formatted ${componentsIdsToFormat.length} components in ${seconds}s.`);
 
     return {
-      data: `${title}\n\n${componentsOutputs}\n\n${summery}`,
+      data: joinSections([title, componentsOutputs, summary]),
       code,
     };
   }
@@ -122,16 +122,15 @@ export class FormatCmd implements Command {
   }
 
   private getOneComponentResultOutput(componentResult: JsonComponentFormatResult, context: OutputContext) {
-    const title = chalk.bold.cyan(componentResult.componentId.toString({ ignoreVersion: true }));
+    const title = formatTitle(componentResult.componentId.toString({ ignoreVersion: true }));
     const filesWithIssues = componentResult.results.filter((fileResult) => fileResult.hasIssues);
     if (!filesWithIssues || !filesWithIssues.length) {
-      return `${title}\n${chalk.green('no issues found')}`;
+      return `${title}\n${formatSuccessSummary('no issues found')}`;
     }
-    let subTitle = chalk.green('the following files have been re-formatted:');
-    if (context.check) {
-      subTitle = chalk.red('issues found in the following files:');
-    }
-    const files = filesWithIssues.map(this.getOneComponentFileResultOutput);
+    const subTitle = context.check
+      ? `${errorSymbol} issues found in the following files:`
+      : formatSuccessSummary('the following files have been re-formatted:');
+    const files = filesWithIssues.map((f) => formatItem(this.getOneComponentFileResultOutput(f)));
     return `${title}\n${subTitle}\n${files.join('\n')}`;
   }
 

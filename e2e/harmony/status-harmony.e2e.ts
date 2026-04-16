@@ -1,6 +1,6 @@
 import { IssuesClasses } from '@teambit/component-issues';
 import { expect } from 'chai';
-import Helper from '../../src/e2e-helper/e2e-helper';
+import { Helper } from '@teambit/legacy.e2e-helper';
 
 describe('status command on Harmony', function () {
   this.timeout(0);
@@ -13,7 +13,7 @@ describe('status command on Harmony', function () {
   });
   describe('main filename is not index and dists are missing', () => {
     before(() => {
-      helper.scopeHelper.reInitLocalScope({ addRemoteScopeAsDefaultScope: false });
+      helper.scopeHelper.reInitWorkspace({ addRemoteScopeAsDefaultScope: false });
       helper.fs.outputFile('comp1/comp1.ts', "require('@my-scope/comp2');");
       helper.fs.outputFile('comp2/comp2.ts');
       helper.command.addComponent('comp1');
@@ -26,7 +26,7 @@ describe('status command on Harmony', function () {
   });
   describe('dists dir is deleted after caching the components', () => {
     before(() => {
-      helper.scopeHelper.reInitLocalScope({ addRemoteScopeAsDefaultScope: false });
+      helper.scopeHelper.reInitWorkspace({ addRemoteScopeAsDefaultScope: false });
       helper.fixtures.populateComponents(1);
       helper.command.status(); // to populate the cache
       // as an intermediate step, make sure the missing-dist is not an issue.
@@ -51,7 +51,7 @@ describe('status command on Harmony', function () {
   });
   describe('package dir is deleted from node-modules', () => {
     before(() => {
-      helper.scopeHelper.reInitLocalScope({ addRemoteScopeAsDefaultScope: false });
+      helper.scopeHelper.reInitWorkspace({ addRemoteScopeAsDefaultScope: false });
       helper.fixtures.populateComponents(1);
       helper.command.status(); // to populate the cache
       // as an intermediate step, make sure the missing-links is not an issue.
@@ -65,7 +65,7 @@ describe('status command on Harmony', function () {
   });
   describe('components that are both: new and auto-tag-pending', () => {
     before(() => {
-      helper.scopeHelper.reInitLocalScope();
+      helper.scopeHelper.reInitWorkspace();
       helper.fixtures.populateComponents(3);
       helper.command.tagWithoutBuild('comp3');
       helper.fixtures.populateComponents(3, undefined, 'v2');
@@ -78,7 +78,7 @@ describe('status command on Harmony', function () {
   });
   describe('components that imports itself', () => {
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       helper.fs.outputFile('bar/index.js', 'export const a = "b";');
       helper.fs.outputFile('bar/foo.js', `import { a } from '@${helper.scopes.remote}/bar';`);
       helper.command.add('bar');
@@ -90,9 +90,31 @@ describe('status command on Harmony', function () {
       expect(show.dependencies).to.have.lengthOf(0);
     });
   });
+  describe('status --quick flag', () => {
+    before(() => {
+      helper.scopeHelper.reInitWorkspace({ addRemoteScopeAsDefaultScope: false });
+      helper.fixtures.populateComponents(3);
+      helper.command.tagWithoutBuild('comp3');
+      helper.fs.appendFile('comp3/index.js', '\n// modified');
+    });
+    it('should show new and modified components', () => {
+      const output = helper.command.runCmd('bit status --quick');
+      expect(output).to.have.string('modified components (files only)');
+      expect(output).to.have.string('comp3');
+      expect(output).to.have.string('new components');
+      expect(output).to.have.string('comp1');
+      expect(output).to.have.string('comp2');
+    });
+    it('should return new and modified in json format', () => {
+      const json = helper.command.statusJson(undefined, '--quick');
+      expect(json.modified).to.include('my-scope/comp3');
+      expect(json.newComponents).to.include('my-scope/comp1');
+      expect(json.newComponents).to.include('my-scope/comp2');
+    });
+  });
   describe('deleting a dependency from the filesystem when the record is still in bitmap', () => {
     before(() => {
-      helper.scopeHelper.setNewLocalAndRemoteScopes();
+      helper.scopeHelper.setWorkspaceWithRemoteScope();
       helper.fixtures.populateComponents(2);
       helper.command.tagWithoutBuild();
       helper.command.export();

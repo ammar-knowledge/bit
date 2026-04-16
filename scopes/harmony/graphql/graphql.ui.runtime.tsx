@@ -1,10 +1,13 @@
-import React, { ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import React from 'react';
 import { UIRuntime } from '@teambit/ui';
-
+import { BatchHttpLink } from '@apollo/client/link/batch-http';
 import { InMemoryCache, ApolloClient, ApolloLink, HttpLink, createHttpLink } from '@apollo/client';
-import type { NormalizedCacheObject } from '@apollo/client';
+import type { DefaultOptions, NormalizedCacheObject, Operation } from '@apollo/client';
 import { WebSocketLink } from '@apollo/client/link/ws';
 import { onError } from '@apollo/client/link/error';
+import { getMainDefinition } from '@apollo/client/utilities';
+import type { OperationDefinitionNode } from 'graphql';
 
 import crossFetch from 'cross-fetch';
 
@@ -25,19 +28,47 @@ type ClientOptions = {
   state?: NormalizedCacheObject;
   /** endpoint for websocket connections */
   subscriptionUri?: string;
+  /** host extension id (workspace or scope). Used to configure the client */
+  host?: string;
+};
+
+export type GraphQLConfig = {
+  enableBatching?: boolean;
+  batchInterval?: number;
+  batchMax?: number;
 };
 
 export class GraphqlUI {
-  createClient(uri: string, { state, subscriptionUri }: ClientOptions = {}) {
+  constructor(readonly config: GraphQLConfig = {}) {}
+
+  createClient(uri: string, { state, subscriptionUri, host }: ClientOptions = {}) {
+    const defaultOptions: DefaultOptions | undefined =
+      host === 'teambit.workspace/workspace'
+        ? {
+            query: {
+              fetchPolicy: 'network-only',
+            },
+            watchQuery: {
+              fetchPolicy: 'network-only',
+            },
+            mutate: {
+              fetchPolicy: 'network-only',
+            },
+          }
+        : undefined;
     const client = new ApolloClient({
       link: this.createLink(uri, { subscriptionUri }),
       cache: this.createCache({ state }),
+      defaultOptions,
     });
 
     return client;
   }
 
   createSsrClient({ serverUrl, headers }: { serverUrl: string; headers: any }) {
+    if (this.config.enableBatching) {
+      return this.createSsrClientBatched({ serverUrl, headers });
+    }
     const link = ApolloLink.from([
       onError(logError),
       createHttpLink({
@@ -57,15 +88,58 @@ export class GraphqlUI {
     return client;
   }
 
+  private createSsrClientBatched({ serverUrl, headers }: { serverUrl: string; headers: any }) {
+    const batchedHttpLink = new BatchHttpLink({
+      uri: serverUrl,
+      credentials: 'include',
+      batchInterval: this.config.batchInterval,
+      batchMax: this.config.batchMax,
+      headers,
+      fetch: crossFetch,
+    });
+
+    const unbatchedHttpLink = new HttpLink({
+      uri: serverUrl,
+      credentials: 'include',
+      headers,
+      fetch: crossFetch,
+    });
+
+    const httpLink = ApolloLink.split(this.isMutation, unbatchedHttpLink, batchedHttpLink);
+
+    return new ApolloClient({
+      ssrMode: true,
+      link: ApolloLink.from([onError(logError), httpLink]),
+      cache: this.createCache(),
+    });
+  }
+
   private createCache({ state }: { state?: NormalizedCacheObject } = {}) {
-    const cache = new InMemoryCache();
+    const cache = new InMemoryCache({
+      typePolicies: {
+        // The Aspect type has an `id` field (the aspect ID, e.g. "teambit.envs/envs").
+        // Without this, Apollo normalizes all Aspect objects by __typename:id, causing
+        // every component to share a single cache entry per aspect ID. This means the
+        // last-written aspect data overwrites all others (e.g. all components show the
+        // same env). Disabling normalization stores aspects inline per component.
+        Aspect: { keyFields: false },
+      },
+    });
 
     if (state) cache.restore(state);
 
     return cache;
   }
 
+  private readonly isMutation = (op: Operation) => {
+    const def = getMainDefinition(op.query) as OperationDefinitionNode;
+    return def.kind === 'OperationDefinition' && def.operation === 'mutation';
+  };
+
   private createLink(uri: string, { subscriptionUri }: { subscriptionUri?: string } = {}) {
+    if (this.config.enableBatching) {
+      return this.createLinkBatched(uri, { subscriptionUri });
+    }
     const httpLink = new HttpLink({ credentials: 'include', uri });
     const subsLink = subscriptionUri
       ? new WebSocketLink({
@@ -80,9 +154,30 @@ export class GraphqlUI {
     return ApolloLink.from([errorLogger, hybridLink]);
   }
 
-  /**
-   * get the graphQL provider
-   */
+  private createLinkBatched(uri: string, { subscriptionUri }: { subscriptionUri?: string } = {}) {
+    const batchedHttpLink = new BatchHttpLink({
+      uri,
+      credentials: 'include',
+      batchInterval: this.config.batchInterval,
+      batchMax: this.config.batchMax,
+    });
+
+    const unbatchedHttpLink = new HttpLink({
+      uri,
+      credentials: 'include',
+    });
+
+    const httpLink = ApolloLink.split(this.isMutation, unbatchedHttpLink, batchedHttpLink);
+
+    const wsLink = subscriptionUri
+      ? new WebSocketLink({ uri: subscriptionUri, options: { reconnect: true } })
+      : undefined;
+
+    const transport = wsLink ? createSplitLink(httpLink, wsLink) : httpLink;
+
+    return ApolloLink.from([onError(logError), transport]);
+  }
+
   getProvider = ({ client, children }: { client: GraphQLClient<any>; children: ReactNode }) => {
     return <GraphQLProvider client={client}>{children}</GraphQLProvider>;
   };
@@ -93,10 +188,14 @@ export class GraphqlUI {
   static dependencies = [];
   static slots = [];
 
-  static async provider() {
-    const graphqlUI = new GraphqlUI();
+  static defaultConfig: GraphQLConfig = {
+    enableBatching: false,
+    batchInterval: 50,
+    batchMax: 20,
+  };
 
-    return graphqlUI;
+  static async provider(_, config: GraphQLConfig) {
+    return new GraphqlUI(config);
   }
 }
 

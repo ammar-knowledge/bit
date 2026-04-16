@@ -2,23 +2,27 @@
 import pMapSeries from 'p-map-series';
 import chalk from 'chalk';
 import { CLITable } from '@teambit/cli-table';
-import { Command, CommandOptions } from '@teambit/cli';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatTitle, formatItem, formatWarningSummary } from '@teambit/cli';
 import { compact } from 'lodash';
-import { ComponentMain, ComponentFactory, Component } from '@teambit/component';
-import { EnvsMain } from './environments.main.runtime';
+import type { ComponentMain, ComponentFactory, Component } from '@teambit/component';
+import type { EnvsMain } from './environments.main.runtime';
 
 export class ListEnvsCmd implements Command {
   name = 'list';
   description = 'list all envs currently used in the workspace';
   options = [];
-  group = 'development';
+  group = 'component-config';
 
-  constructor(private envs: EnvsMain, private componentAspect: ComponentMain) {}
+  constructor(
+    private envs: EnvsMain,
+    private componentAspect: ComponentMain
+  ) {}
 
   async report() {
-    const allEnvs = this.envs.getAllRegisteredEnvs().join('\n');
-    const title = chalk.green('the following envs are available in the workspace:');
-    return `${title}\n${allEnvs}`;
+    const items = this.envs.getAllRegisteredEnvsIds().map((id) => formatItem(id));
+    const title = formatTitle('available envs in the workspace');
+    return `${title}\n${items.join('\n')}`;
   }
 }
 
@@ -43,9 +47,12 @@ export class GetEnvCmd implements Command {
       'show information about the specific services only. for multiple services, separate by a comma and wrap with quotes',
     ],
   ] as CommandOptions;
-  group = 'development';
+  group = 'component-config';
 
-  constructor(private envs: EnvsMain, private componentAspect: ComponentMain) {}
+  constructor(
+    private envs: EnvsMain,
+    private componentAspect: ComponentMain
+  ) {}
 
   async showEnv(id: string, host: ComponentFactory, servicesArr: string[] | undefined) {
     const component = await host.get(await host.resolveComponentId(id));
@@ -53,7 +60,7 @@ export class GetEnvCmd implements Command {
     const env = this.envs.getEnv(component);
     const envRuntime = await this.envs.createEnvironment([component]);
     const envExecutionContext = envRuntime.getEnvExecutionContext();
-    const services = this.envs.getServices(env);
+    const services = await this.envs.getServices(env);
     const allP = services.services.map(async ([serviceId, service]) => {
       if (servicesArr && !servicesArr.includes(serviceId)) return null;
       const serviceTitle = chalk.cyan.bold.underline(serviceId);
@@ -63,7 +70,7 @@ export class GetEnvCmd implements Command {
 
     const all = compact(await Promise.all(allP));
 
-    const envTitle = chalk.green(`Environment: ${env.id}`);
+    const envTitle = formatTitle(`Environment: ${env.id}`);
     return `${envTitle}\n${all.join('\n\n')}`;
   }
 
@@ -80,15 +87,20 @@ export class GetEnvCmd implements Command {
 export class EnvsCmd implements Command {
   name = 'envs';
   alias = 'env';
-  description = 'list all components maintained by the workspace and their corresponding envs';
+  description = 'show components and their assigned environments';
+  extendedDescription = `displays a table showing each workspace component and its corresponding environment.
+environments control how components are built, tested, linted, and deployed.`;
   options = [];
-  group = 'development';
+  group = 'component-config';
   commands: Command[] = [];
 
   // private showNonLoadedEnvsWarning = false;
   private nonLoadedEnvs = new Set<string>();
 
-  constructor(private envs: EnvsMain, private componentAspect: ComponentMain) {}
+  constructor(
+    private envs: EnvsMain,
+    private componentAspect: ComponentMain
+  ) {}
 
   async report(): Promise<string> {
     const host = this.componentAspect.getHost();
@@ -109,7 +121,13 @@ export class EnvsCmd implements Command {
       if (!isLoaded) {
         this.nonLoadedEnvs.add(envIdStr);
       }
-      const envWithErr = isLoaded ? envIdStr : `${envIdStr} ${chalk.red('(not loaded)')}`;
+      let envWithErr = isLoaded ? envIdStr : `${envIdStr} ${chalk.red('(not loaded)')}`;
+
+      const envComp = await this.envs.getEnvComponentByEnvId(envId.toString());
+      if (envComp && envComp.isDeleted()) {
+        envWithErr = `${envIdStr} ${chalk.red('(deleted)')}`;
+      }
+
       return {
         component: component.id.toString(),
         env: envWithErr,
@@ -132,9 +150,8 @@ export class EnvsCmd implements Command {
   getNonLoadedEnvsWarning() {
     if (!this.nonLoadedEnvs.size) return '';
     const list = Array.from(this.nonLoadedEnvs.values()).join(',');
-    return chalk.yellow(`warning: bit wasn't able to load the following envs: ${chalk.cyan(list)}.
-please run ${chalk.cyan("'bit install'")} to fix. if this doesn't help, run ${chalk.cyan(
-      "'bit status'"
-    )} to see if there are any additional issues`);
+    return formatWarningSummary(
+      `bit wasn't able to load the following envs: ${list}. please run 'bit install' to fix. if this doesn't help, run 'bit status' to see if there are any additional issues`
+    );
   }
 }

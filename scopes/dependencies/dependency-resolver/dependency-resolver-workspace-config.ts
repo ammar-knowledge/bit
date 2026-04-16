@@ -1,8 +1,10 @@
-import { PeerDependencyRules } from '@pnpm/types';
-import { WorkspacePolicyConfigObject } from './policy';
-import { PackageImportMethod } from './package-manager';
+import type { PeerDependencyRules } from '@pnpm/types';
+import type { WorkspacePolicyConfigObject } from './policy';
+import type { PackageImportMethod } from './package-manager';
 
 export type NodeLinker = 'hoisted' | 'isolated';
+
+export type ComponentRangePrefix = '~' | '^' | '+' | '-';
 
 export interface DependencyResolverWorkspaceConfig {
   policy: WorkspacePolicyConfigObject;
@@ -11,7 +13,7 @@ export interface DependencyResolverWorkspaceConfig {
    * and 'librarian'. our recommendation is use 'librarian' which reduces package duplicates
    * and totally removes the need of a 'node_modules' directory in your project.
    */
-  packageManager: string;
+  packageManager?: string;
 
   /**
    * A proxy server for out going network requests by the package manager
@@ -38,14 +40,14 @@ export interface DependencyResolverWorkspaceConfig {
 
   /**
    * A client certificate to pass when accessing the registry. Values should be in PEM format (Windows calls it "Base-64 encoded X.509 (.CER)") with newlines replaced by the string "\n". For example:
-   * cert="-----BEGIN CERTIFICATE-----\nXXXX\nXXXX\n-----END CERTIFICATE-----"
+   * cert="----BEGIN CERTIFICATE-----\nXXXX\nXXXX\n-----END CERTIFICATE----"
    * It is not the path to a certificate file (and there is no "certfile" option).
    */
   cert?: string;
 
   /**
    * A client key to pass when accessing the registry. Values should be in PEM format with newlines replaced by the string "\n". For example:
-   * key="-----BEGIN PRIVATE KEY-----\nXXXX\nXXXX\n-----END PRIVATE KEY-----"
+   * key="----BEGIN PRIVATE KEY-----\nXXXX\nXXXX\n-----END PRIVATE KEY----"
    * It is not the path to a key file (and there is no "keyfile" option).
    */
   key?: string;
@@ -175,11 +177,22 @@ export interface DependencyResolverWorkspaceConfig {
    */
   isolatedCapsules?: boolean;
 
-  /*
+  /**
    * Ignore the builds of specific dependencies. The "preinstall", "install", and "postinstall" scripts
    * of the listed packages will not be executed during installation.
    */
   neverBuiltDependencies?: string[];
+
+  /**
+   * Fine-grained control over dependency lifecycle scripts. Allows explicitly permitting (true), blocking (false), or warning ('warn')
+   * for specific dependencies' "preinstall", "install", and "postinstall" scripts during installation.
+   */
+  allowScripts?: Record<string, boolean | 'warn'>;
+
+  /**
+   * Set this to true in order to allow all dependencies to run install scripts.
+   */
+  dangerouslyAllowAllScripts?: boolean;
 
   /**
    * If true, staleness checks for cached data will be bypassed, but missing data will be requested from the server.
@@ -199,7 +212,63 @@ export interface DependencyResolverWorkspaceConfig {
   hoistPatterns?: string[];
 
   /**
+   * When true, dependencies from the workspace are hoisted to node_modules/.pnpm/node_modules
+   * even if they are found in the root node_modules
+   */
+  hoistInjectedDependencies?: boolean;
+
+  /**
    * Tells pnpm to automatically install peer dependencies. It is true by default.
    */
   autoInstallPeers?: boolean;
+
+  /**
+   * When true (default), pnpm will deduplicate peer dependencies.
+   * Set to false to disable peer dependency deduplication.
+   */
+  dedupePeers?: boolean;
+
+  /**
+   * When true (default), env peer dependencies defined in env.jsonc are resolved once and merged
+   * into the workspace root manifest as regular dependencies, instead of being injected into each
+   * component's manifest individually. Conflicts between envs are resolved by picking the version
+   * that satisfies the most envs, with a warning logged for any conflicts.
+   * Set to false to revert to the legacy per-component env peer injection behavior.
+   */
+  resolveEnvPeersFromRoot?: boolean;
+
+  /**
+   * When true, ALL env peer dependencies are forced to the workspace root manifest,
+   * even when different envs specify conflicting versions. The best version is chosen
+   * (satisfying the most envs) and a warning is logged for unsatisfied envs.
+   * When false (default), conflicting peers without `workspaceSingleton` are injected
+   * per-component, allowing different envs to use different versions.
+   * Only applies when resolveEnvPeersFromRoot is true.
+   */
+  forceEnvPeersToRoot?: boolean;
+
+  /**
+   * By default, Bit saves component dependencies with exact versions (pinned) in the package.json,
+   * even if the dependency-resolver policy specifies a version range.
+   *
+   * To preserve the range defined in the policy, set this value to "+".
+   * To apply a predefined range ("~" or "^") to other component dependencies not covered by the policy,
+   * set this to the desired range symbol.
+   */
+  componentRangePrefix?: ComponentRangePrefix;
+
+  externalPackageManager?: boolean;
+
+  /**
+   * Defines the minimum number of minutes that must pass after a version is published before pnpm will install it.
+   * This applies to all dependencies, including transitive ones.
+   */
+  minimumReleaseAge?: number;
+
+  /**
+   * If you set minimumReleaseAge but need certain dependencies to always install the newest version immediately,
+   * you can list them under minimumReleaseAgeExclude. The exclusion works by package name or package name pattern
+   * and applies to all versions of that package.
+   */
+  minimumReleaseAgeExclude?: string[];
 }

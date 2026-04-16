@@ -1,14 +1,13 @@
 import { validateEnvPolicyConfigObject } from './validate-env-policy';
-import {
-  createVariantPolicyEntry,
+import type {
   VariantPolicyEntry,
-  VariantPolicy,
   VariantPolicyConfigObject,
   VariantPolicyFromConfigObjectOptions,
 } from '../variant-policy';
-import { DependencyLifecycleType } from '../../dependencies';
+import { createVariantPolicyEntry, VariantPolicy } from '../variant-policy';
+import type { DependencyLifecycleType } from '../../dependencies';
 
-type EnvJsoncPolicyEntry = {
+export type EnvJsoncPolicyEntry = {
   name: string;
   version: string;
   /**
@@ -24,6 +23,19 @@ type EnvJsoncPolicyEntry = {
 
 export type EnvJsoncPolicyPeerEntry = EnvJsoncPolicyEntry & {
   supportedRange: string;
+  /**
+   * When true, this peer dependency will be resolved as a single version at the workspace root,
+   * even if different envs specify different versions. Useful for @types packages and workspace-level
+   * tools (eslint, prettier) that must resolve from the workspace root.
+   * When false (default), conflicts are resolved per-component via env roots.
+   */
+  workspaceSingleton?: boolean;
+  /**
+   * When true, generates a pnpm override for this peer using its version,
+   * forcing all transitive dependencies to use the same version.
+   * Useful to prevent old versions from being pulled by published packages.
+   */
+  override?: boolean;
 };
 
 export type VersionKeyName = 'version' | 'supportedRange';
@@ -44,13 +56,18 @@ export type EnvPolicyLegacyConfigObject = Pick<EnvPolicyEnvJsoncConfigObject, 'p
 export type EnvPolicyConfigObject = EnvPolicyEnvJsoncConfigObject | EnvPolicyLegacyConfigObject;
 
 export class EnvPolicy extends VariantPolicy {
-  constructor(_policiesEntries: VariantPolicyEntry[], readonly selfPolicy: VariantPolicy) {
+  constructor(
+    _policiesEntries: VariantPolicyEntry[],
+    readonly selfPolicy: VariantPolicy,
+    readonly envId?: string
+  ) {
     super(_policiesEntries);
   }
 
   static fromConfigObject(
-    configObject,
-    { includeLegacyPeersInSelfPolicy }: VariantPolicyFromConfigObjectOptions = {}
+    configObject: EnvPolicyConfigObject,
+    { includeLegacyPeersInSelfPolicy }: VariantPolicyFromConfigObjectOptions = {},
+    envId?: string
   ): EnvPolicy {
     validateEnvPolicyConfigObject(configObject);
 
@@ -59,9 +76,12 @@ export class EnvPolicy extends VariantPolicy {
      * Always force it for the env itself
      */
     let selfPeersEntries: VariantPolicyEntry[];
+    // @ts-ignore TODO: need to fix this, the | confusing the compiler
     if (includeLegacyPeersInSelfPolicy && !configObject.peers && configObject.peerDependencies) {
+      // @ts-ignore TODO: need to fix this, the | confusing the compiler
       selfPeersEntries = handleLegacyPeers(configObject);
     } else {
+      // @ts-ignore TODO: need to fix this, the | confusing the compiler
       selfPeersEntries = entriesFromKey(configObject, 'peers', 'version', 'runtime', {
         source: 'env-own',
         force: true,
@@ -75,10 +95,12 @@ export class EnvPolicy extends VariantPolicy {
      * Those were always forced on the components as visible dependencies.
      */
     const legacyPolicy = VariantPolicy.fromConfigObject(configObject, { source: 'env', force: true, hidden: false });
+    // @ts-ignore TODO: need to fix this, the | confusing the compiler
     const componentPeersEntries = entriesFromKey(configObject, 'peers', 'supportedRange', 'peer', { source: 'env' });
     const otherKeyNames: EnvJsoncPolicyConfigKey[] = ['dev', 'runtime'];
     const otherEntries: VariantPolicyEntry[] = otherKeyNames.reduce(
       (acc: VariantPolicyEntry[], keyName: EnvJsoncPolicyConfigKey) => {
+        // @ts-ignore TODO: need to fix this, the | confusing the compiler
         const currEntries = entriesFromKey(configObject, keyName, 'version', keyName as DependencyLifecycleType, {
           source: 'env',
         });
@@ -88,7 +110,7 @@ export class EnvPolicy extends VariantPolicy {
     );
     const newPolicy = VariantPolicy.fromArray(componentPeersEntries.concat(otherEntries));
     const finalComponentPolicy = VariantPolicy.mergePolices([legacyPolicy, newPolicy]);
-    return new EnvPolicy(finalComponentPolicy.entries, selfPolicy);
+    return new EnvPolicy(finalComponentPolicy.entries, selfPolicy, envId);
   }
 
   static getEmpty(): EnvPolicy {
@@ -122,7 +144,17 @@ function entriesFromKey(
     return [];
   }
   const entries = configEntries.map((entry) => {
-    return createVariantPolicyEntry(entry.name, entry[versionKey], lifecycleType, {
+    if (!entry[versionKey]) {
+      throw new Error(
+        `env.jsonc: "policy.${keyName}" entry must be a property with a "${versionKey}" field. got "${entry}"`
+      );
+    }
+    const peerEntry = entry as EnvJsoncPolicyPeerEntry;
+    const hasPeerProps = 'workspaceSingleton' in entry || 'override' in entry;
+    const value = hasPeerProps
+      ? { version: entry[versionKey], workspaceSingleton: peerEntry.workspaceSingleton, override: peerEntry.override }
+      : entry[versionKey];
+    return createVariantPolicyEntry(entry.name, value, lifecycleType, {
       ...options,
       source: options.source ?? 'env',
       hidden: entry.hidden,

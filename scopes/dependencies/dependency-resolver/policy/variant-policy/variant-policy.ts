@@ -1,9 +1,10 @@
-import { sha1 } from '@teambit/legacy/dist/utils';
+import { sha1 } from '@teambit/toolbox.crypto.sha1';
 import { compact, sortBy, uniqWith } from 'lodash';
 import { snapToSemver } from '@teambit/component-package-version';
-import { DependenciesOverridesData } from '@teambit/legacy/dist/consumer/config/component-overrides';
-import { Policy, PolicyConfigKeys, PolicyConfigKeysNames, PolicyEntry, SemverVersion } from '../policy';
-import { DependencyLifecycleType, KEY_NAME_BY_LIFECYCLE_TYPE, LIFECYCLE_TYPE_BY_KEY_NAME } from '../../dependencies';
+import type { DependenciesOverridesData } from '@teambit/legacy.consumer-config';
+import type { Policy, PolicyConfigKeys, PolicyConfigKeysNames, PolicyEntry, SemverVersion } from '../policy';
+import type { DependencyLifecycleType } from '../../dependencies';
+import { KEY_NAME_BY_LIFECYCLE_TYPE, LIFECYCLE_TYPE_BY_KEY_NAME } from '../../dependencies';
 
 export type VariantPolicyConfigObject = Partial<Record<keyof PolicyConfigKeys, VariantPolicyLifecycleConfigObject>>;
 
@@ -25,6 +26,9 @@ type VariantPolicyLifecycleConfigEntryObject = {
   optional?: boolean;
 };
 
+export type VariantPolicyConfigArr = Partial<Record<PolicyConfigKeysNames, VariantPolicyLifecycleConfigEntryObject[]>>;
+type VariantPolicyConfigObj = Partial<Record<PolicyConfigKeysNames, Record<string, VariantPolicyConfigEntryValue>>>;
+
 export type VariantPolicyConfigEntryValue = VariantPolicyEntryValue | VariantPolicyEntryVersion;
 
 /**
@@ -36,6 +40,8 @@ export type VariantPolicyEntryValue = {
   version: VariantPolicyEntryVersion;
   resolveFromEnv?: boolean;
   optional?: boolean;
+  workspaceSingleton?: boolean;
+  override?: boolean;
 };
 
 export type DependencySource = 'auto' | 'env' | 'env-own' | 'slots' | 'config';
@@ -229,7 +235,10 @@ export class VariantPolicy implements Policy<VariantPolicyConfigObject> {
     return res;
   }
 
-  static fromConfigObject(configObject, options: VariantPolicyFromConfigObjectOptions = {}): VariantPolicy {
+  static fromConfigObject(
+    configObject: any, // VariantPolicyConfigArr | VariantPolicyConfigObj,
+    options: VariantPolicyFromConfigObjectOptions = {}
+  ): VariantPolicy {
     const runtimeEntries = entriesFromKey(configObject, 'dependencies', options);
     const devEntries = entriesFromKey(configObject, 'devDependencies', options);
     const peerEntries = entriesFromKey(configObject, 'peerDependencies', options);
@@ -268,7 +277,7 @@ function uniqEntries(entries: Array<VariantPolicyEntry>): Array<VariantPolicyEnt
 }
 
 function entriesFromKey(
-  configObject: VariantPolicyConfigObject,
+  configObject: VariantPolicyConfigArr | VariantPolicyConfigObj,
   keyName: PolicyConfigKeysNames,
   options: VariantPolicyFromConfigObjectOptions
 ): VariantPolicyEntry[] {
@@ -330,13 +339,20 @@ export function createVariantPolicyEntry(
   lifecycleType: DependencyLifecycleType,
   opts: VariantPolicyFromConfigObjectOptions
 ): VariantPolicyEntry {
+  if (!value) {
+    throw new Error(`createVariantPolicyEntry, value is missing for ${depId}`);
+  }
   const version = typeof value === 'string' ? value : value.version;
   const resolveFromEnv = typeof value === 'string' ? false : value.resolveFromEnv;
   const optional = typeof value === 'string' ? undefined : value.optional;
+  const workspaceSingleton = typeof value === 'string' ? undefined : value.workspaceSingleton;
+  const override = typeof value === 'string' ? undefined : value.override;
 
   const entryValue: VariantPolicyEntryValue = {
     version,
     resolveFromEnv,
+    workspaceSingleton,
+    override,
   };
   const entry: VariantPolicyEntry = {
     ...opts,

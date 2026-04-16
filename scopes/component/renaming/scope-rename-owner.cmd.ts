@@ -1,6 +1,6 @@
-import { Command, CommandOptions } from '@teambit/cli';
-import chalk from 'chalk';
-import { RenamingMain } from './renaming.main.runtime';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatSuccessSummary, joinSections } from '@teambit/cli';
+import type { RenamingMain } from './renaming.main.runtime';
 import { renameScopeOutput } from './scope-rename.cmd';
 
 export class ScopeRenameOwnerCmd implements Command {
@@ -16,16 +16,15 @@ export class ScopeRenameOwnerCmd implements Command {
       'refactor',
       'update the import statements in all dependent components to the new package name (that contains the new owner name)',
     ],
-    ['', 'ast', 'EXPERIMENTAL. use ast to transform files instead of regex'],
+    ['', 'ast', 'use ast to transform files instead of regex'],
   ] as CommandOptions;
-  group = 'development';
+  group = 'component-config';
 
   constructor(private renaming: RenamingMain) {}
 
   async report([oldName, newName]: [string, string], { refactor }: { refactor?: boolean }) {
     const results = await this.renaming.renameOwner(oldName, newName, { refactor });
-    const title = chalk.green(`successfully replaced "${oldName}" owner with "${newName}"`);
     const renameOutput = renameScopeOutput(results);
-    return `${title}\n${renameOutput}`;
+    return joinSections([formatSuccessSummary(`replaced "${oldName}" owner with "${newName}"`), renameOutput]);
   }
 }

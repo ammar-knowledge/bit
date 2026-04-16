@@ -1,10 +1,11 @@
 // eslint-disable-next-line max-classes-per-file
-import { Command, CommandOptions } from '@teambit/cli';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatTitle, formatItem, formatSuccessSummary, formatHint, joinSections } from '@teambit/cli';
 import { CLITable } from '@teambit/cli-table';
 import chalk from 'chalk';
-import { ExtensionDataList } from '@teambit/legacy/dist/consumer/config';
-import { COMPONENT_PATTERN_HELP } from '@teambit/legacy/dist/constants';
-import { AspectMain } from './aspect.main.runtime';
+import type { ExtensionDataList } from '@teambit/legacy.extension-data';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { AspectMain } from './aspect.main.runtime';
 
 export class ListAspectCmd implements Command {
   name = 'list [pattern]';
@@ -16,7 +17,7 @@ export class ListAspectCmd implements Command {
     },
   ];
   options = [['d', 'debug', 'show the origins where the aspects were taken from']] as CommandOptions;
-  group = 'development';
+  group = 'info-analysis';
 
   constructor(private aspect: AspectMain) {}
 
@@ -39,6 +40,28 @@ export class ListAspectCmd implements Command {
   }
 }
 
+export class ListCoreAspectCmd implements Command {
+  name = 'list-core';
+  description = 'list all core aspects';
+  arguments = [
+    {
+      name: 'pattern',
+      description: COMPONENT_PATTERN_HELP,
+    },
+  ];
+  options = [['j', 'json', 'format as json']] as CommandOptions;
+  group = 'info-analysis';
+
+  constructor(private aspect: AspectMain) {}
+
+  async report() {
+    return this.aspect.listCoreAspects().join('\n');
+  }
+  async json() {
+    return this.aspect.listCoreAspects();
+  }
+}
+
 export type SetAspectOptions = { merge?: boolean };
 
 export class SetAspectCmd implements Command {
@@ -51,26 +74,26 @@ export class SetAspectCmd implements Command {
     },
     {
       name: 'aspect-id',
-      description: "the aspect's component id",
+      description: `the aspect's component id`,
     },
     {
       name: 'config',
-      description: `the aspect config. enter the config as a stringified JSON (e.g. '{"foo":"bar"}' ). when no config is provided, an aspect is set with an empty config ({}).`,
+      description: `the aspect config. enter the config as a stringified JSON (e.g. \`{"foo":"bar"}\` ). when no config is provided, an aspect is set with an empty config ({}).`,
     },
   ];
   options = [
     ['m', 'merge', 'merge with an existing config if exits. (by default, it replaces overlapping existing configs)'],
   ] as CommandOptions;
-  group = 'development';
+  group = 'component-config';
 
   constructor(private aspect: AspectMain) {}
 
   async report([pattern, aspectId, config]: [string, string, string], options: SetAspectOptions) {
     const configParsed = config ? JSON.parse(config) : {};
     const results = await this.aspect.setAspectsToComponents(pattern, aspectId, configParsed, options);
-    if (!results.length)
-      return chalk.yellow(`unable to find any matching components for ${chalk.bold(pattern)} pattern`);
-    return chalk.green(`the following component(s) have been successfully updated:\n${results.join('\n')}`);
+    if (!results.length) return formatHint(`unable to find any matching components for ${chalk.bold(pattern)} pattern`);
+    const items = results.map((r) => formatItem(r.toString()));
+    return joinSections([formatSuccessSummary('the following component(s) have been updated'), items.join('\n')]);
   }
 }
 
@@ -100,21 +123,22 @@ export class UpdateAspectCmd implements Command {
     },
   ];
   options = [];
-  group = 'development';
+  group = 'component-config';
 
   constructor(private aspect: AspectMain) {}
 
   async report([aspectId, pattern]: [string, string]) {
     const { updated, alreadyUpToDate } = await this.aspect.updateAspectsToComponents(aspectId, pattern);
     if (updated.length) {
-      return chalk.green(`the following component(s) have been successfully updated:\n${updated.join('\n')}`);
+      const items = updated.map((u) => formatItem(u.toString()));
+      return joinSections([formatSuccessSummary('the following component(s) have been updated'), items.join('\n')]);
     }
     if (alreadyUpToDate.length) {
-      return chalk.green(
+      return formatSuccessSummary(
         `all ${alreadyUpToDate.length} component(s) that use this aspect are already up to date. nothing to update`
       );
     }
-    return chalk.yellow(`unable to find any components in this workspace that use ${chalk.bold(aspectId)}`);
+    return formatHint(`unable to find any components in this workspace that use ${chalk.bold(aspectId)}`);
   }
 }
 
@@ -132,15 +156,15 @@ export class UnsetAspectCmd implements Command {
     },
   ];
   options = [];
-  group = 'development';
+  group = 'component-config';
 
   constructor(private aspect: AspectMain) {}
 
   async report([pattern, aspectId]: [string, string]) {
     const results = await this.aspect.unsetAspectsFromComponents(pattern, aspectId);
-    if (!results.length)
-      return chalk.yellow(`unable to find any matching components for ${chalk.bold(pattern)} pattern`);
-    return chalk.green(`the following component(s) have been successfully updated:\n${results.join('\n')}`);
+    if (!results.length) return formatHint(`unable to find any matching components for ${chalk.bold(pattern)} pattern`);
+    const items = results.map((r) => formatItem(r.toString()));
+    return joinSections([formatSuccessSummary('the following component(s) have been updated'), items.join('\n')]);
   }
 }
 
@@ -157,7 +181,7 @@ export class GetAspectCmd implements Command {
     ['d', 'debug', 'show the origins where the aspects were taken from'],
     ['j', 'json', 'format as json'],
   ] as CommandOptions;
-  group = 'development';
+  group = 'info-analysis';
 
   constructor(private aspect: AspectMain) {}
 
@@ -181,20 +205,18 @@ ${chalk.bold('data:')}   ${JSON.stringify(data, undefined, 2)}
       } = await this.aspect.getAspectsOfComponentForDebugging(componentName);
       const beforeMergeOutput = beforeMerge
         .map(({ origin, extensions, extraData }) => {
-          const title = chalk.green.bold(`Origin: ${origin}`);
+          const title = formatTitle(`Origin: ${origin}`);
           const details = extensionsDetailsToString(extensions);
           const moreData = extraData ? `\n${chalk.bold('Extra Data:')} ${JSON.stringify(extraData, undefined, 2)}` : '';
           return `${title}\n${details}${moreData}`;
         })
         .join('\n\n');
 
-      const afterMergeTitle = chalk.green.bold('After merging the origins above');
-      const afterMergeOutput = `${afterMergeTitle}\n${extensionsDetailsToString(mergedExtensions)}`;
+      const afterMergeOutput = `${formatTitle('After merging the origins above')}\n${extensionsDetailsToString(mergedExtensions)}`;
 
-      const afterFinalMergeTitle = chalk.green.bold('Final - After merging the origins above and the loaded data');
-      const afterFinalMergeOutput = `${afterFinalMergeTitle}\n${extensionsDetailsToString(aspects.toLegacy())}`;
+      const afterFinalMergeOutput = `${formatTitle('Final - After merging the origins above and the loaded data')}\n${extensionsDetailsToString(aspects.toLegacy())}`;
 
-      return `${beforeMergeOutput}\n\n${afterMergeOutput}\n\n\n${afterFinalMergeOutput}`;
+      return joinSections([beforeMergeOutput, afterMergeOutput, afterFinalMergeOutput]);
     }
     const aspects = await this.aspect.getAspectsOfComponent(componentName);
     const extensionDataList = aspects.toLegacy();
@@ -242,9 +264,12 @@ ${chalk.bold('data:')}   ${JSON.stringify(data, undefined, 2)}
 export class AspectCmd implements Command {
   name = 'aspect <sub-command>';
   alias = '';
-  description = 'manage aspects';
+  description = 'manage component aspects and their configurations';
+  extendedDescription = `aspects provide functionality and tools for components throughout their development lifecycle.
+primarily useful for inspecting aspect assignments and configurations with "bit aspect get".
+rarely used for manual aspect management as most aspects are configured automatically.`;
   options = [];
-  group = 'development';
+  group = 'component-config';
   commands: Command[] = [];
 
   async report([unrecognizedSubcommand]: [string]) {

@@ -1,11 +1,11 @@
-import { Command, CommandOptions } from '@teambit/cli';
-import chalk from 'chalk';
-import { RenameResult, RenamingMain } from './renaming.main.runtime';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatTitle, formatItem, formatSuccessSummary, joinSections } from '@teambit/cli';
+import type { RenameResult, RenamingMain } from './renaming.main.runtime';
 
 export class ScopeRenameCmd implements Command {
   name = 'rename <current-scope-name> <new-scope-name>';
   description =
-    "rename the scope name for all components with the specified 'current scope name', if exported, create new components and deprecate the original ones";
+    "rename the scope name for all components with the specified 'current scope name'. if exported, create new components and delete the original ones";
   extendedDescription = `Note: if \`<current-scope-name>\` is also the defaultScope for the workspace, this command will set \`<new-scope-name>\`
 as the defaultScope instead, and that will then be set for all components by default. You may see updates in your .bitmap file
 as a result of this change`;
@@ -14,6 +14,7 @@ as a result of this change`;
     { name: 'new-scope-name', description: 'a new scope name to replace the current scope name' },
   ];
   options = [
+    ['', 'preserve', 'avoid renaming files and variables/classes according to the new scope name'],
     [
       'r',
       'refactor',
@@ -21,35 +22,37 @@ as a result of this change`;
     ],
     ['', 'deprecate', 'for exported components, instead of deleting the original components, deprecating them'],
   ] as CommandOptions;
-  group = 'development';
+  group = 'component-config';
 
   constructor(private renaming: RenamingMain) {}
 
   async report(
     [oldName, newName]: [string, string],
-    { refactor, deprecate }: { refactor?: boolean; deprecate?: boolean }
+    { refactor, deprecate, preserve }: { refactor?: boolean; deprecate?: boolean; preserve?: boolean }
   ) {
-    const result = await this.renaming.renameScope(oldName, newName, { refactor, deprecate });
-    const title = chalk.green(`successfully replaced "${oldName}" scope with "${newName}"`);
+    const result = await this.renaming.renameScope(oldName, newName, { refactor, deprecate, preserve });
     const renameOutput = renameScopeOutput(result);
-    return `${title}\n${renameOutput}`;
+    return joinSections([formatSuccessSummary(`replaced "${oldName}" scope with "${newName}"`), renameOutput]);
   }
 }
 
 export function renameScopeOutput(renameResult: RenameResult): string {
   const { renameData, refactoredIds } = renameResult;
-  const renamedIdsStr = renameData.length
-    ? `\n${chalk.bold('the following components were affected by this scope-name change:')}\n${renameData
-        .map(
-          (item) =>
-            `${item.sourceId.toStringWithoutVersion()} ${
-              item.isTagged ? '(deprecated) ' : ''
-            }-> ${item.targetId.toString()}`
-        )
-        .join('\n')}`
+  const renamedSection = renameData.length
+    ? [
+        formatTitle(`affected components (${renameData.length})`),
+        ...renameData.map((item) =>
+          formatItem(
+            `${item.sourceId.toStringWithoutVersion()} ${item.isTagged ? '(deprecated) ' : ''}-> ${item.targetId.toString()}`
+          )
+        ),
+      ].join('\n')
     : '';
-  const refactoredStr = refactoredIds.length
-    ? `\n\n${chalk.bold('the following components have been refactored:')}\n${refactoredIds.join('\n')}`
+  const refactoredSection = refactoredIds.length
+    ? [
+        formatTitle(`refactored components (${refactoredIds.length})`),
+        ...refactoredIds.map((id) => formatItem(id.toString())),
+      ].join('\n')
     : '';
-  return renamedIdsStr + refactoredStr;
+  return joinSections([renamedSection, refactoredSection]);
 }

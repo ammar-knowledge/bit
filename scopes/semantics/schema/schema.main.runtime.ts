@@ -1,31 +1,41 @@
-import { MainRuntime, CLIMain, CLIAspect } from '@teambit/cli';
-import { ComponentAspect, Component, ComponentMain } from '@teambit/component';
-import { Slot, SlotRegistry } from '@teambit/harmony';
-import { GraphqlAspect, GraphqlMain } from '@teambit/graphql';
-import { EnvsAspect, EnvsMain } from '@teambit/envs';
-import { Logger, LoggerAspect, LoggerMain } from '@teambit/logger';
-import { PrettierConfigMutator } from '@teambit/defender.prettier.config-mutator';
-import {
-  APISchema,
-  Export,
-  Schemas,
-  SchemaNodeConstructor,
-  SchemaRegistry,
-} from '@teambit/semantics.entities.semantic-schema';
-import { BuilderMain, BuilderAspect } from '@teambit/builder';
-import { Workspace, WorkspaceAspect } from '@teambit/workspace';
-import { ScopeAspect, ScopeMain } from '@teambit/scope';
-import { Formatter } from '@teambit/formatter';
-import { SchemaNodeTransformer, SchemaTransformer } from '@teambit/typescript';
-import { Parser } from './parser';
+import type { CLIMain } from '@teambit/cli';
+import { MainRuntime, CLIAspect } from '@teambit/cli';
+import type { Component, ComponentMain } from '@teambit/component';
+import { ComponentAspect } from '@teambit/component';
+import type { SlotRegistry } from '@teambit/harmony';
+import { Slot } from '@teambit/harmony';
+import type { GraphqlMain } from '@teambit/graphql';
+import { GraphqlAspect } from '@teambit/graphql';
+import type { EnvsMain } from '@teambit/envs';
+import { EnvsAspect } from '@teambit/envs';
+import type { Logger, LoggerMain } from '@teambit/logger';
+import { LoggerAspect } from '@teambit/logger';
+import type { PrettierConfigMutator } from '@teambit/defender.prettier.config-mutator';
+import type { Export, SchemaNodeConstructor } from '@teambit/semantics.entities.semantic-schema';
+import { APISchema, Schemas, SchemaRegistry } from '@teambit/semantics.entities.semantic-schema';
+import type { BuilderMain } from '@teambit/builder';
+import { BuilderAspect } from '@teambit/builder';
+import type { Workspace } from '@teambit/workspace';
+import { WorkspaceAspect } from '@teambit/workspace';
+import type { ScopeMain } from '@teambit/scope';
+import { ScopeAspect } from '@teambit/scope';
+import type { Formatter } from '@teambit/formatter';
+import type { SchemaNodeTransformer, SchemaTransformer } from '@teambit/typescript';
+import { BuildStatus, CENTRAL_BIT_HUB_NAME, SYMPHONY_GRAPHQL } from '@teambit/legacy.constants';
+import { Http } from '@teambit/scope.network';
+import type { ImpactRule, APIDiffResult } from '@teambit/semantics.entities.semantic-schema-diff';
+import { ImpactAssessor, DEFAULT_IMPACT_RULES, computeAPIDiff } from '@teambit/semantics.entities.semantic-schema-diff';
+import type { Parser } from './parser';
 import { SchemaAspect } from './schema.aspect';
-import { SchemaExtractor } from './schema-extractor';
+import type { SchemaExtractor } from './schema-extractor';
 import { SchemaCommand } from './schema.cmd';
+import { SchemaDiffCommand } from './schema-diff.cmd';
 import { schemaSchema } from './schema.graphql';
 import { SchemaTask, SCHEMA_TASK_NAME } from './schema.task';
 import { SchemaService } from './schema.service';
 
 export type ParserSlot = SlotRegistry<Parser>;
+export type ImpactRuleSlot = SlotRegistry<ImpactRule[]>;
 
 export type SchemaConfig = {
   /**
@@ -48,6 +58,11 @@ export class SchemaMain {
      */
     private parserSlot: ParserSlot,
 
+    /**
+     * impact rules slot — other aspects register custom rules via registerImpactRules().
+     */
+    private impactRuleSlot: ImpactRuleSlot,
+
     private envs: EnvsMain,
 
     private config: SchemaConfig,
@@ -56,7 +71,9 @@ export class SchemaMain {
 
     private workspace: Workspace,
 
-    private logger: Logger
+    private logger: Logger,
+
+    private impactAssessor: ImpactAssessor
   ) {}
 
   /**
@@ -66,8 +83,16 @@ export class SchemaMain {
     return this.parserSlot.get(this.config.defaultParser) as Parser;
   }
 
+  /**
+   * @deprecated use registerSchemaClasses instead
+   * registerSchemaClasses is better for performance as it lazy-loads the schemas.
+   */
   registerSchemaClass(schema: SchemaNodeConstructor) {
     SchemaRegistry.register(schema);
+  }
+
+  registerSchemaClasses(getSchemas: () => SchemaNodeConstructor[]) {
+    SchemaRegistry.registerGetSchemas(getSchemas);
   }
 
   /**
@@ -113,36 +138,52 @@ export class SchemaMain {
     contextPath?: string,
     skipInternals?: boolean,
     schemaTransformers?: SchemaTransformer[],
-    apiTransformers?: SchemaNodeTransformer[]
+    apiTransformers?: SchemaNodeTransformer[],
+    includeFiles?: string[]
   ): Promise<APISchema> {
     if (this.config.disabled) {
       return APISchema.empty(component.id as any);
     }
 
-    if (alwaysRunExtractor || this.workspace) {
-      const env = this.envs.getEnv(component).env;
-      // types need to be fixed
-      const formatter: Formatter | undefined = env.getFormatter?.(null, [
-        (config: PrettierConfigMutator) => {
-          config.setKey('parser', 'typescript');
-          return config;
-        },
-      ]);
-      if (typeof env.getSchemaExtractor === 'undefined') {
-        throw new Error(`No SchemaExtractor defined for ${env.name}`);
+    if (alwaysRunExtractor || (this.workspace && component.buildStatus !== BuildStatus.Succeed)) {
+      try {
+        const env = this.envs.getEnv(component).env;
+        // types need to be fixed
+        const formatter: Formatter | undefined = env.getFormatter?.(null, [
+          (config: PrettierConfigMutator) => {
+            config.setKey('parser', 'typescript');
+            return config;
+          },
+        ]);
+        if (typeof env.getSchemaExtractor === 'undefined') {
+          throw new Error(`No SchemaExtractor defined for ${env.name}`);
+        }
+        const schemaExtractor: SchemaExtractor = env.getSchemaExtractor(
+          undefined,
+          tsserverPath,
+          contextPath,
+          schemaTransformers,
+          apiTransformers
+        );
+
+        const result = await schemaExtractor.extract(component, {
+          formatter,
+          tsserverPath,
+          contextPath,
+          skipInternals,
+          includeFiles,
+        });
+        if (shouldDisposeResourcesOnceDone) schemaExtractor.dispose();
+
+        return result;
+      } catch (err) {
+        if (alwaysRunExtractor) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `failed extracting schema for ${component.id.toString()}, falling back to artifacts. extractor error: ${message}`,
+          err
+        );
       }
-      const schemaExtractor: SchemaExtractor = env.getSchemaExtractor(
-        undefined,
-        tsserverPath,
-        contextPath,
-        schemaTransformers,
-        apiTransformers
-      );
-
-      const result = await schemaExtractor.extract(component, { formatter, tsserverPath, contextPath, skipInternals });
-      if (shouldDisposeResourcesOnceDone) schemaExtractor.dispose();
-
-      return result;
     }
 
     // on scope get schema from builder api
@@ -181,6 +222,23 @@ export class SchemaMain {
     return APISchema.fromObject(obj);
   }
 
+  async getSchemaFromRemote(id: string): Promise<APISchema> {
+    const isPattern = ['*', ',', '!', '$', ':'].some((char) => id.includes(char));
+    if (isPattern) {
+      throw new Error(`remote schema command doesn't support pattern matching. please use a specific component id`);
+    }
+    const getId = async () => {
+      if (!id.startsWith('@')) return id;
+      if (!this.workspace) throw new Error(`Please provide a component ID. The ${id} recognized as a package name.`);
+      const compId = await this.workspace.resolveComponentIdFromPackageName(id, true);
+      return compId.toString();
+    };
+    const compIdStr = await getId();
+    const http = await Http.connect(SYMPHONY_GRAPHQL, CENTRAL_BIT_HUB_NAME);
+    const response = await http.getSchema(compIdStr);
+    return this.getSchemaFromObject(response);
+  }
+
   /**
    * register a new parser.
    */
@@ -199,6 +257,37 @@ export class SchemaMain {
     return component.state.aspects.get(SchemaAspect.id)?.data;
   }
 
+  /**
+   * Register custom impact rules for API diff assessment.
+   * Custom rules take priority over default rules.
+   * This allows environments to customize what constitutes a breaking change.
+   */
+  registerImpactRules(rules: ImpactRule[]): void {
+    this.impactRuleSlot.register(rules);
+  }
+
+  /**
+   * Get the ImpactAssessor with default + all registered custom rules from the slot.
+   */
+  getImpactAssessor(): ImpactAssessor {
+    this.impactAssessor.registerRules(this.impactRuleSlot.values().flat());
+    return this.impactAssessor;
+  }
+
+  /**
+   * Compute the semantic API diff between two component versions.
+   */
+  async computeAPIDiff(baseComp: Component, compareComp: Component): Promise<APIDiffResult | null> {
+    try {
+      const [baseSchema, compareSchema] = await Promise.all([this.getSchema(baseComp), this.getSchema(compareComp)]);
+      const assessor = this.getImpactAssessor();
+      return computeAPIDiff(baseSchema, compareSchema, assessor);
+    } catch (err: any) {
+      this.logger.warn(`failed computing API diff: ${err.message}`);
+      return null;
+    }
+  }
+
   isSchemaTaskDisabled(component: Component) {
     return this.getSchemaData(component)?.disabled;
   }
@@ -214,7 +303,7 @@ export class SchemaMain {
     WorkspaceAspect,
     ScopeAspect,
   ];
-  static slots = [Slot.withType<Parser>()];
+  static slots = [Slot.withType<Parser>(), Slot.withType<ImpactRule[]>()];
 
   static defaultConfig = {
     defaultParser: 'teambit.typescript/typescript',
@@ -230,17 +319,21 @@ export class SchemaMain {
       LoggerMain,
       BuilderMain,
       Workspace,
-      ScopeMain
+      ScopeMain,
     ],
     config: SchemaConfig,
-    [parserSlot]: [ParserSlot]
+    [parserSlot, impactRuleSlot]: [ParserSlot, ImpactRuleSlot]
   ) {
     const logger = loggerMain.createLogger(SchemaAspect.id);
-    const schema = new SchemaMain(parserSlot, envs, config, builder, workspace, logger);
+    const impactAssessor = new ImpactAssessor();
+    impactAssessor.registerDefaultRules(DEFAULT_IMPACT_RULES);
+    const schema = new SchemaMain(parserSlot, impactRuleSlot, envs, config, builder, workspace, logger, impactAssessor);
     const schemaTask = new SchemaTask(SchemaAspect.id, schema, logger);
     builder.registerBuildTasks([schemaTask]);
-    cli.register(new SchemaCommand(schema, component, logger));
-    graphql.register(schemaSchema(schema));
+    const schemaCmd = new SchemaCommand(schema, component, logger);
+    schemaCmd.commands = [new SchemaDiffCommand(schema, component, logger)];
+    cli.register(schemaCmd);
+    graphql.register(() => schemaSchema(schema));
     envs.registerService(new SchemaService());
     if (workspace) {
       workspace.registerOnComponentLoad(async () => schema.calcSchemaData());
@@ -249,9 +342,7 @@ export class SchemaMain {
       scope.registerOnCompAspectReCalc(async () => schema.calcSchemaData());
     }
     // register all default schema classes
-    Object.values(Schemas).forEach((Schema) => {
-      schema.registerSchemaClass(Schema);
-    });
+    schema.registerSchemaClasses(() => Object.values(Schemas));
 
     return schema;
   }

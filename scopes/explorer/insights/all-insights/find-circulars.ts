@@ -1,9 +1,9 @@
-import { Component } from '@teambit/component';
-import { IssuesClasses } from '@teambit/component-issues';
-import { GraphMain } from '@teambit/graph';
+import type { Component } from '@teambit/component';
+import { IssuesClasses, renderCycles } from '@teambit/component-issues';
+import type { GraphMain } from '@teambit/graph';
 import { uniq } from 'lodash';
-import { Insight, InsightResult, RawResult } from '../insight';
-import { RunInsightOptions } from '../insight-manager';
+import type { Insight, InsightResult, RawResult } from '../insight';
+import type { RunInsightOptions } from '../insight-manager';
 
 export const INSIGHT_CIRCULAR_DEPS_NAME = 'circular';
 
@@ -23,6 +23,8 @@ export default class FindCycles implements Insight {
       };
     }
     const cycles = graph.findCycles(undefined, opts?.includeDeps);
+    // add the first component to the end to make the circular visible in the output
+    cycles.forEach((cycle) => cycle.push(cycle[0]));
     if (cycles.length === 1) {
       return {
         message: `Found ${cycles.length} cycle.`,
@@ -36,17 +38,7 @@ export default class FindCycles implements Insight {
   }
 
   private renderData(data: RawResult) {
-    if (data.data.length === 0) {
-      return 'No cyclic dependencies';
-    }
-    const string = data.data
-      .map((cycle) => {
-        return `\nCyclic dependency
------------------
-- ${cycle.join('\n- ')}`;
-      })
-      .join('\n');
-    return string;
+    return renderCycles(data.data ?? []);
   }
 
   async run(opts?: RunInsightOptions): Promise<InsightResult> {
@@ -70,7 +62,7 @@ export default class FindCycles implements Insight {
 
   async addAsComponentIssue(components: Component[]) {
     const result = await this.runInsight({ ids: components.map((c) => c.id) });
-    if (!result.data.length) {
+    if (!result.data || !result.data.length) {
       return; // no circulars
     }
     const allIds = uniq(result.data.flat());

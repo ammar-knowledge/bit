@@ -1,7 +1,6 @@
-import { ComponentID } from '@teambit/component-id';
-import { SourceFile } from '@teambit/legacy/dist/consumer/component/sources';
-import { SourceFileModel } from '@teambit/legacy/dist/scope/models/version';
-import { Repository } from '@teambit/legacy/dist/scope/objects';
+import type { ComponentID } from '@teambit/component-id';
+import { SourceFile } from '@teambit/component.sources';
+import type { Repository, SourceFileModel } from '@teambit/objects';
 
 type FILE_STATUS = 'new' | 'modified' | 'deleted' | 'unchanged';
 type PathLinux = string; // ts fails when importing it from @teambit/legacy/dist/utils/path.
@@ -13,7 +12,7 @@ export class CompFiles {
     private repository: Repository,
     private currentFiles: SourceFile[],
     readonly compDir: PathLinux,
-    private modelFiles: SourceFileModel[] = []
+    readonly modelFiles: SourceFileModel[] = []
   ) {}
 
   isModified(): boolean {

@@ -1,12 +1,15 @@
 import chalk from 'chalk';
-import { Command } from '@teambit/cli';
-import { PathChangeResult } from '@teambit/legacy/dist/consumer/bit-map/bit-map';
-import { MoverMain } from './mover.main.runtime';
+import type { Command } from '@teambit/cli';
+import { formatTitle, formatItem, joinSections } from '@teambit/cli';
+import type { PathChangeResult } from '@teambit/legacy.bit-map';
+import type { MoverMain } from './mover.main.runtime';
 
 export class MoveCmd implements Command {
   name = 'move <current-component-dir> <new-component-dir>';
-  description =
-    "move a component to a different filesystem path (note: this does NOT affect the component's name or scope, just its location in the workspace)";
+  description = 'relocate a component to a different directory';
+  extendedDescription = `moves component files to a new location within the workspace and updates the .bitmap tracking.
+only changes the filesystem location - does not affect the component's name, scope, or ID.
+useful for reorganizing workspace structure or following new directory conventions.`;
   helpUrl = 'reference/workspace/moving-components';
   arguments = [
     {
@@ -18,8 +21,7 @@ export class MoveCmd implements Command {
       description: "the new directory (relative to the workspace root) to create and move the component's files to",
     },
   ];
-  group = 'development';
-  extendedDescription = `move files or directories of component(s)\n`;
+  group = 'component-development';
   alias = 'mv';
   loader = true;
   options = [];
@@ -28,13 +30,13 @@ export class MoveCmd implements Command {
 
   async report([from, to]: [string, string]) {
     const componentsChanged: PathChangeResult[] = await this.mover.movePaths({ from, to });
-    const output = componentsChanged.map((component) => {
-      const title = chalk.green(`moved component ${component.id.toString()}:\n`);
-      const files = component.changes
-        .map((file) => `from ${chalk.bold(file.from)} to ${chalk.bold(file.to)}`)
-        .join('\n');
-      return title + files;
+    const sections = componentsChanged.map((component) => {
+      const title = formatTitle(`moved component ${component.id.toString()}`);
+      const files = component.changes.map((file) =>
+        formatItem(`from ${chalk.bold(file.from)} to ${chalk.bold(file.to)}`)
+      );
+      return `${title}\n${files.join('\n')}`;
     });
-    return output.join('\n');
+    return joinSections(sections);
   }
 }

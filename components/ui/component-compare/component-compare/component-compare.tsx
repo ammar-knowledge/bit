@@ -1,36 +1,147 @@
 /* eslint-disable react/destructuring-assignment */
 /* eslint-disable react/require-default-props */
-import React, { useContext, useMemo, HTMLAttributes } from 'react';
+import type { HTMLAttributes } from 'react';
+import React, { useContext, useMemo } from 'react';
 import classnames from 'classnames';
-import { LegacyComponentLog } from '@teambit/legacy-component-log';
-import {
-  CollapsibleMenuNav,
-  ComponentContext,
-  ComponentDescriptorContext,
-  ComponentID,
-  NavPlugin,
-  useComponent,
-} from '@teambit/component';
+import type { LegacyComponentLog } from '@teambit/legacy-component-log';
+import type { ComponentID, NavPlugin } from '@teambit/component';
+import { CollapsibleMenuNav, ComponentContext, ComponentDescriptorContext, useComponent } from '@teambit/component';
 import { ComponentCompareContext } from '@teambit/component.ui.component-compare.context';
 import { useComponentCompareQuery } from '@teambit/component.ui.component-compare.hooks.use-component-compare';
-import {
+import type {
   FileCompareResult,
   FieldCompareResult,
 } from '@teambit/component.ui.component-compare.models.component-compare-model';
 import { useCompareQueryParam } from '@teambit/component.ui.component-compare.hooks.use-component-compare-url';
 import { ComponentCompareVersionPicker } from '@teambit/component.ui.component-compare.version-picker';
-import { ComponentCompareHooks } from '@teambit/component.ui.component-compare.models.component-compare-hooks';
+import type { ComponentCompareHooks } from '@teambit/component.ui.component-compare.models.component-compare-hooks';
 import { useLocation } from '@teambit/base-react.navigation.link';
 import { SlotRouter } from '@teambit/ui-foundation.ui.react-router.slot-router';
-import { ComponentCompareProps, TabItem } from '@teambit/component.ui.component-compare.models.component-compare-props';
+import type {
+  ComponentCompareProps,
+  TabItem,
+} from '@teambit/component.ui.component-compare.models.component-compare-props';
 import { groupByVersion } from '@teambit/component.ui.component-compare.utils.group-by-version';
 import { sortTabs } from '@teambit/component.ui.component-compare.utils.sort-tabs';
 import { sortByDateDsc } from '@teambit/component.ui.component-compare.utils.sort-logs';
 import { extractLazyLoadedData } from '@teambit/component.ui.component-compare.utils.lazy-loading';
 import { BlockSkeleton, WordSkeleton } from '@teambit/base-ui.loaders.skeleton';
 import { ChangeType } from '@teambit/component.ui.component-compare.models.component-compare-change-type';
+import { useDataQuery } from '@teambit/ui-foundation.ui.hooks.use-data-query';
+import { gql } from '@apollo/client';
 
 import styles from './component-compare.module.scss';
+
+// Extend ChangeType with API (the external enum doesn't have it yet)
+const ChangeTypeAPI = 'API' as unknown as ChangeType;
+
+export type APIDiffDetail = {
+  changeKind: string;
+  description: string;
+  impact: string;
+  from?: string;
+  to?: string;
+};
+
+export type APIDiffChange = {
+  status: string;
+  visibility: string;
+  exportName: string;
+  schemaType: string;
+  schemaTypeRaw: string;
+  impact: string;
+  baseSignature?: string;
+  compareSignature?: string;
+  baseNode?: Record<string, any>;
+  compareNode?: Record<string, any>;
+  changes?: APIDiffDetail[];
+};
+
+export type APIDiffResult = {
+  hasChanges: boolean;
+  impact: string;
+  publicChanges: APIDiffChange[];
+  internalChanges: APIDiffChange[];
+  changes: APIDiffChange[];
+  added: number;
+  removed: number;
+  modified: number;
+  breaking: number;
+  nonBreaking: number;
+  patch: number;
+};
+
+const QUERY_API_DIFF = gql`
+  query ComponentCompareAPIDiff($baseId: String!, $compareId: String!) {
+    getHost {
+      id
+      apiDiff(baseId: $baseId, compareId: $compareId) {
+        hasChanges
+        impact
+        added
+        removed
+        modified
+        breaking
+        nonBreaking
+        patch
+        publicChanges {
+          status
+          visibility
+          exportName
+          schemaType
+          schemaTypeRaw
+          impact
+          baseSignature
+          compareSignature
+          baseNode
+          compareNode
+          changes {
+            changeKind
+            description
+            impact
+            from
+            to
+          }
+        }
+        internalChanges {
+          status
+          visibility
+          exportName
+          schemaType
+          schemaTypeRaw
+          impact
+          baseSignature
+          compareSignature
+          changes {
+            changeKind
+            description
+            impact
+            from
+            to
+          }
+        }
+      }
+    }
+  }
+`;
+
+function useAPIDiffQuery(
+  baseId?: string,
+  compareId?: string,
+  skip?: boolean
+): { loading?: boolean; apiDiffResult?: APIDiffResult | null } {
+  const { data, loading } = useDataQuery<{
+    getHost: { apiDiff: APIDiffResult | null };
+  }>(QUERY_API_DIFF, {
+    variables: { baseId, compareId },
+    skip: skip || !baseId || !compareId || baseId === compareId,
+  });
+
+  return {
+    loading,
+    apiDiffResult: data?.getHost?.apiDiff,
+  };
+}
 
 const findPrevVersionFromCurrent = (compareVersion) => (_, index: number, logs: LegacyComponentLog[]) => {
   if (compareVersion === 'workspace' || logs.length === 1) return true;
@@ -101,7 +212,7 @@ function CompareMenuNav({ tabs, state, hooks, changes: changed }: ComponentCompa
           {
             ...tab,
             props: {
-              ...(tab.props || {}),
+              ...tab.props,
               key,
               displayName: (!loading && tab.displayName) || undefined,
               active: isActive,
@@ -142,7 +253,8 @@ function deriveChangeType(
   compareId?: ComponentID,
   fileCompareDataByName?: Map<string, FileCompareResult> | null,
   fieldCompareDataByName?: Map<string, FieldCompareResult> | null,
-  testCompareDataByName?: Map<string, FileCompareResult> | null
+  testCompareDataByName?: Map<string, FileCompareResult> | null,
+  apiDiffResult?: APIDiffResult | null
 ): ChangeType[] | undefined | null {
   if (!baseId && !compareId) return null;
   if (!baseId?.version) return [ChangeType.NEW];
@@ -152,9 +264,12 @@ function deriveChangeType(
 
   const fileCompareData = [...fileCompareDataByName.values()];
 
+  const hasApiChanges = apiDiffResult?.hasChanges ?? false;
+
   if (
     fieldCompareDataByName.size === 0 &&
-    (fileCompareDataByName.size === 0 || fileCompareData.every((f) => f.status === 'UNCHANGED'))
+    (fileCompareDataByName.size === 0 || fileCompareData.every((f) => f.status === 'UNCHANGED')) &&
+    !hasApiChanges
   ) {
     return [ChangeType.NONE];
   }
@@ -176,6 +291,10 @@ function deriveChangeType(
 
   if ([...fieldCompareDataByName.values()].some((field) => DEPS_FIELD.includes(field.fieldName))) {
     changed.push(ChangeType.DEPENDENCY);
+  }
+
+  if (hasApiChanges) {
+    changed.push(ChangeTypeAPI);
   }
 
   return changed;
@@ -253,7 +372,7 @@ function RenderCompareScreen(
 // eslint-disable-next-line complexity
 export function ComponentCompare(props: ComponentCompareProps) {
   const {
-    host,
+    host: hostFromProps,
     baseId: baseIdFromProps,
     compareId: compareIdFromProps,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -276,16 +395,21 @@ export function ComponentCompare(props: ComponentCompareProps) {
   } = props;
 
   const baseVersion = useCompareQueryParam('baseVersion');
+
   const component = useContext(ComponentContext);
   const componentDescriptor = useContext(ComponentDescriptorContext);
   const location = useLocation();
-  const isWorkspace = host === 'teambit.workspace/workspace';
-
+  const isWorkspace = hostFromProps === 'teambit.workspace/workspace';
+  const compareHost =
+    isWorkspace && !location?.search.includes('version') && !compareIdFromProps && component.logs?.length === 0
+      ? hostFromProps
+      : 'teambit.scope/scope';
+  const host = 'teambit.scope/scope';
   const {
     component: compareComponent,
     loading: loadingCompare,
     componentDescriptor: compareComponentDescriptor,
-  } = useComponent(host, compareIdOverride?.toString() || compareIdFromProps?.toString(), {
+  } = useComponent(compareHost, compareIdOverride?.toString() || compareIdFromProps?.toString(), {
     skip: hidden || (!compareIdFromProps && !compareIdOverride),
     customUseComponent,
     logFilters: {
@@ -348,13 +472,19 @@ export function ComponentCompare(props: ComponentCompareProps) {
   }, [compare?.id.toString()]);
 
   const skipComponentCompareQuery =
-    hidden || compareIsLocalChanges || base?.id.version?.toString() === compare?.id.version?.toString();
+    hidden || (base?.id.version?.toString() === compare?.id.version?.toString() && !compareIsLocalChanges);
 
   const { loading: compCompareLoading, componentCompareData } = useComponentCompareQuery(
     base?.id.toString(),
     compare?.id.toString(),
     undefined,
     skipComponentCompareQuery
+  );
+
+  const { loading: apiDiffLoading, apiDiffResult } = useAPIDiffQuery(
+    base?.id.toString(),
+    compare?.id.toString(),
+    hidden
   );
 
   const fileCompareDataByName = useMemo(() => {
@@ -388,6 +518,11 @@ export function ComponentCompare(props: ComponentCompareProps) {
     return testCompareDataByNameLookup;
   }, [compCompareLoading, loading, compCompareId]);
 
+  const resolvedApiDiff = useMemo(() => {
+    if (loading || apiDiffLoading) return undefined;
+    return apiDiffResult ?? null;
+  }, [loading, apiDiffLoading, compCompareId, apiDiffResult]);
+
   const componentCompareModel = {
     compare: compare && {
       model: compare,
@@ -407,13 +542,21 @@ export function ComponentCompare(props: ComponentCompareProps) {
     fieldCompareDataByName,
     fileCompareDataByName,
     testCompareDataByName,
+    apiDiffResult: resolvedApiDiff,
     isFullScreen,
     hidden,
   };
 
   const changes =
     changesFromProps ||
-    deriveChangeType(baseId, compare?.id, fileCompareDataByName, fieldCompareDataByName, testCompareDataByName);
+    deriveChangeType(
+      baseId,
+      compare?.id,
+      fileCompareDataByName,
+      fieldCompareDataByName,
+      testCompareDataByName,
+      resolvedApiDiff
+    );
 
   return (
     <ComponentCompareContext.Provider value={componentCompareModel}>

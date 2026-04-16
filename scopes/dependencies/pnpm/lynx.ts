@@ -2,46 +2,53 @@ import semver from 'semver';
 import parsePackageName from 'parse-package-name';
 import { initDefaultReporter } from '@pnpm/default-reporter';
 import { streamParser } from '@pnpm/logger';
-import { StoreController, WantedDependency } from '@pnpm/package-store';
+import type { StoreController, WantedDependency } from '@pnpm/package-store';
+import { TRUSTED_PACKAGE_NAMES } from '@pnpm/plugin-trusted-deps';
 import { rebuild } from '@pnpm/plugin-commands-rebuild';
-import { createOrConnectStoreController, CreateStoreControllerOptions } from '@pnpm/store-connection-manager';
+import type { CreateStoreControllerOptions } from '@pnpm/store-connection-manager';
+import { createOrConnectStoreController } from '@pnpm/store-connection-manager';
 import { sortPackages } from '@pnpm/sort-packages';
-import {
+import type {
+  PackageManifest,
+  ProjectManifest,
+  ReadPackageHook,
+  PeerDependencyRules,
+  ProjectRootDir,
+  DepPath,
+} from '@pnpm/types';
+import type { Registries } from '@teambit/pkg.entities.registry';
+import { getAuthConfig } from '@teambit/pkg.config.auth';
+import type {
   ResolvedPackageVersion,
-  Registries,
-  NPM_REGISTRY,
-  Registry,
   PackageManagerProxyConfig,
   PackageManagerNetworkConfig,
 } from '@teambit/dependency-resolver';
 import { BitError } from '@teambit/bit-error';
-import {
-  MutatedProject,
-  mutateModules,
-  InstallOptions,
-  PeerDependencyIssuesByProjects,
-  ProjectOptions,
-} from '@pnpm/core';
+import { BIT_ROOTS_DIR } from '@teambit/legacy.constants';
+import type { MutatedProject, InstallOptions, PeerDependencyIssuesByProjects, ProjectOptions } from '@pnpm/core';
+import { mutateModules } from '@pnpm/core';
 import * as pnpm from '@pnpm/core';
-import { createClient, ClientOptions } from '@pnpm/client';
-import { pickRegistryForPackage } from '@pnpm/pick-registry-for-package';
+import type { ClientOptions } from '@pnpm/client';
+import { createClient } from '@pnpm/client';
 import { restartWorkerPool, finishWorkers } from '@pnpm/worker';
 import { createPkgGraph } from '@pnpm/workspace.pkgs-graph';
-import { PackageManifest, ProjectManifest, ReadPackageHook } from '@pnpm/types';
-import { Logger } from '@teambit/logger';
-import toNerfDart from 'nerf-dart';
+import { readWantedLockfile, writeWantedLockfile } from '@pnpm/lockfile.fs';
+import { type LockfileFile, type LockfileObject } from '@pnpm/lockfile.types';
+import type { Logger } from '@teambit/logger';
+import { VIRTUAL_STORE_DIR_MAX_LENGTH } from '@teambit/dependencies.pnpm.dep-path';
+import { isEqual } from 'lodash';
 import { pnpmErrorToBitError } from './pnpm-error-to-bit-error';
 import { readConfig } from './read-config';
 
+/**
+ * Packages that are known to have risky or unnecessary build scripts.
+ * These packages will be disallowed from running scripts by default,
+ * unless the user explicitly allows them in `allowScripts`.
+ */
+const UNTRUSTED_PACKAGE_NAMES = ['es5-ext', 'less', 'protobufjs', 'ssh', 'core-js-pure', 'core-js'];
+
 const installsRunning: Record<string, Promise<any>> = {};
 const cafsLocker = new Map<string, number>();
-
-type RegistriesMap = {
-  default: string;
-  [registryName: string]: string;
-};
-
-const STORE_CACHE: Record<string, { ctrl: StoreController; dir: string }> = {};
 
 async function createStoreController(
   options: {
@@ -75,26 +82,37 @@ async function createStoreController(
     preferOffline: options.preferOffline,
     resolveSymlinksInInjectedDirs: true,
     pnpmHomeDir: options.pnpmHomeDir,
+    userAgent: options.networkConfig.userAgent,
+    fetchRetries: options.networkConfig.fetchRetries,
+    fetchRetryFactor: options.networkConfig.fetchRetryFactor,
+    fetchRetryMaxtimeout: options.networkConfig.fetchRetryMaxtimeout,
+    fetchRetryMintimeout: options.networkConfig.fetchRetryMintimeout,
+    fetchTimeout: options.networkConfig.fetchTimeout,
+    virtualStoreDirMaxLength: VIRTUAL_STORE_DIR_MAX_LENGTH,
+    registries: options.registries.toMap(),
+    fetchWarnTimeoutMs: options.networkConfig.fetchWarnTimeoutMs,
+    fetchMinSpeedKiBps: options.networkConfig.fetchMinSpeedKiBps,
   };
-  // We should avoid the recreation of store.
-  // The store holds cache that makes subsequent resolutions faster.
-  const cacheKey = JSON.stringify(opts);
-  if (!STORE_CACHE[cacheKey]) {
-    // Although it would be enough to call createNewStoreController(),
-    // that doesn't resolve the store directory location.
-    STORE_CACHE[cacheKey] = await createOrConnectStoreController(opts);
-  }
-  return STORE_CACHE[cacheKey];
+  return createOrConnectStoreController(opts);
 }
 
-async function generateResolverAndFetcher(
-  cacheDir: string,
-  registries: Registries,
-  proxyConfig: PackageManagerProxyConfig = {},
-  networkConfig: PackageManagerNetworkConfig = {}
-) {
+export async function generateResolverAndFetcher({
+  cacheDir,
+  registries,
+  proxyConfig,
+  networkConfig,
+  fullMetadata,
+}: {
+  cacheDir: string;
+  registries: Registries;
+  proxyConfig?: PackageManagerProxyConfig;
+  networkConfig?: PackageManagerNetworkConfig;
+  fullMetadata?: boolean;
+}) {
   const pnpmConfig = await readConfig();
   const authConfig = getAuthConfig(registries);
+  proxyConfig ??= {};
+  networkConfig ??= {};
   const opts: ClientOptions = {
     authConfig: Object.assign({}, pnpmConfig.config.rawConfig, authConfig),
     cacheDir,
@@ -108,12 +126,17 @@ async function generateResolverAndFetcher(
     strictSsl: networkConfig.strictSSL,
     timeout: networkConfig.fetchTimeout,
     rawConfig: pnpmConfig.config.rawConfig,
+    userAgent: networkConfig.userAgent,
     retry: {
       factor: networkConfig.fetchRetryFactor,
       maxTimeout: networkConfig.fetchRetryMaxtimeout,
       minTimeout: networkConfig.fetchRetryMintimeout,
       retries: networkConfig.fetchRetries,
     },
+    registries: registries.toMap(),
+    fullMetadata,
+    fetchWarnTimeoutMs: networkConfig?.fetchWarnTimeoutMs,
+    fetchMinSpeedKiBps: networkConfig?.fetchMinSpeedKiBps,
   };
   const result = createClient(opts);
   return result;
@@ -132,17 +155,13 @@ export async function getPeerDependencyIssues(
   } & Pick<CreateStoreControllerOptions, 'packageImportMethod' | 'pnpmHomeDir'>
 ): Promise<PeerDependencyIssuesByProjects> {
   const projects: ProjectOptions[] = [];
-  const workspacePackages = {};
   for (const [rootDir, manifest] of Object.entries(manifestsByPaths)) {
     projects.push({
       buildIndex: 0, // this is not used while searching for peer issues anyway
       manifest,
-      rootDir,
+      rootDir: rootDir as ProjectRootDir,
     });
-    workspacePackages[manifest.name] = workspacePackages[manifest.name] || {};
-    workspacePackages[manifest.name][manifest.version] = { dir: rootDir, manifest };
   }
-  const registriesMap = getRegistriesMap(opts.registries);
   const storeController = await createStoreController({
     ...opts,
     rootDir: opts.rootDir,
@@ -153,8 +172,9 @@ export async function getPeerDependencyIssues(
     storeController: storeController.ctrl,
     storeDir: storeController.dir,
     overrides: opts.overrides,
-    workspacePackages,
-    registries: registriesMap,
+    peersSuffixMaxLength: 1000,
+    registries: opts.registries.toMap(),
+    virtualStoreDirMaxLength: VIRTUAL_STORE_DIR_MAX_LENGTH,
   });
 }
 
@@ -166,6 +186,8 @@ export interface ReportOptions {
   hideAddedPkgsProgress?: boolean;
   hideProgressPrefix?: boolean;
   hideLifecycleOutput?: boolean;
+  peerDependencyRules?: PeerDependencyRules;
+  process?: NodeJS.Process;
 }
 
 export async function install(
@@ -185,8 +207,13 @@ export async function install(
     includeOptionalDeps?: boolean;
     reportOptions?: ReportOptions;
     hidePackageManagerOutput?: boolean;
+    hoistInjectedDependencies?: boolean;
     dryRun?: boolean;
+    dedupePeers?: boolean;
     dedupeInjectedDeps?: boolean;
+    forcedHarmonyVersion?: string;
+    allowScripts?: Record<string, boolean | 'warn'>;
+    dangerouslyAllowAllScripts?: boolean;
   } & Pick<
     InstallOptions,
     | 'autoInstallPeers'
@@ -194,26 +221,36 @@ export async function install(
     | 'hoistPattern'
     | 'lockfileOnly'
     | 'nodeVersion'
+    | 'enableModulesDir'
     | 'engineStrict'
     | 'excludeLinksFromLockfile'
-    | 'peerDependencyRules'
+    | 'minimumReleaseAge'
+    | 'minimumReleaseAgeExclude'
     | 'neverBuiltDependencies'
     | 'ignorePackageManifest'
     | 'hoistWorkspacePackages'
+    | 'returnListOfDepsRequiringBuild'
   > &
     Pick<CreateStoreControllerOptions, 'packageImportMethod' | 'pnpmHomeDir' | 'preferOffline'>,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   logger?: Logger
-): Promise<{ dependenciesChanged: boolean; rebuild: RebuildFn; storeDir: string }> {
-  let externalDependencies: Set<string> | undefined;
-  const readPackage: ReadPackageHook[] = [];
+): Promise<{ dependenciesChanged: boolean; rebuild: RebuildFn; storeDir: string; depsRequiringBuild?: DepPath[] }> {
+  const externalDependencies = new Set<string>();
+  const readPackage = createReadPackageHooks(options);
   if (options?.rootComponents && !options?.rootComponentsForCapsules) {
-    externalDependencies = new Set(
-      Object.values(manifestsByPaths)
-        .map(({ name }) => name)
-        .filter(Boolean) as string[]
-    );
-    readPackage.push(readPackageHook as ReadPackageHook);
+    for (const [dir, { name }] of Object.entries(manifestsByPaths)) {
+      if (dir !== rootDir && name) {
+        externalDependencies.add(name);
+      }
+    }
+  }
+  const overrides = {
+    ...options.overrides,
+  };
+  if (options.forcedHarmonyVersion) {
+    // Harmony needs to be a singleton, so if a specific version was requested for the workspace,
+    // we force that version accross the whole dependency graph.
+    overrides['@teambit/harmony'] = options.forcedHarmonyVersion;
   }
   if (!manifestsByPaths[rootDir].dependenciesMeta) {
     manifestsByPaths = {
@@ -224,13 +261,9 @@ export async function install(
       },
     };
   }
-  if (options?.rootComponentsForCapsules) {
-    readPackage.push(readPackageHookForCapsules as ReadPackageHook);
-  }
-  const { allProjects, packagesToBuild, workspacePackages } = groupPkgs(manifestsByPaths, {
+  const { allProjects, packagesToBuild } = groupPkgs(manifestsByPaths, {
     update: options?.updateAll,
   });
-  const registriesMap = getRegistriesMap(registries);
   const authConfig = getAuthConfig(registries);
   const storeController = await createStoreController({
     rootDir,
@@ -243,6 +276,12 @@ export async function install(
     packageImportMethod: options?.packageImportMethod,
     pnpmHomeDir: options?.pnpmHomeDir,
   });
+  const hoistPattern = options.hoistPattern ?? ['*'];
+  if (hoistPattern.length > 0 && externalDependencies.size > 0 && !options.hoistInjectedDependencies) {
+    for (const pkgName of externalDependencies) {
+      hoistPattern.push(`!${pkgName}`);
+    }
+  }
   const opts: InstallOptions = {
     allProjects,
     autoInstallPeers: options.autoInstallPeers,
@@ -250,21 +289,19 @@ export async function install(
     confirmModulesPurge: false,
     storeDir: storeController.dir,
     dedupePeerDependents: true,
-    dedupeInjectedDeps: options.dedupeInjectedDeps,
     dir: rootDir,
     storeController: storeController.ctrl,
-    workspacePackages,
     preferFrozenLockfile: true,
     pruneLockfileImporters: true,
     lockfileOnly: options.lockfileOnly ?? false,
     modulesCacheMaxAge: Infinity, // pnpm should never prune the virtual store. Bit does it on its own.
-    neverBuiltDependencies: options.neverBuiltDependencies,
-    registries: registriesMap,
+    registries: registries.toMap(),
     resolutionMode: 'highest',
     rawConfig: authConfig,
     hooks: { readPackage },
     externalDependencies,
     strictPeerDependencies: false,
+    peersSuffixMaxLength: 1000,
     resolveSymlinksInInjectedDirs: true,
     resolvePeersFromWorkspaceRoot: true,
     dedupeDirectDeps: true,
@@ -273,17 +310,30 @@ export async function install(
       devDependencies: true,
       optionalDependencies: options?.includeOptionalDeps !== false,
     },
+    userAgent: networkConfig.userAgent,
     ...options,
+    injectWorkspacePackages: true,
+    ...resolveScriptPolicies({
+      allowScripts: options.allowScripts,
+      neverBuiltDependencies: options.neverBuiltDependencies,
+      dangerouslyAllowAllScripts: options.dangerouslyAllowAllScripts,
+    }),
+    returnListOfDepsRequiringBuild: true,
     excludeLinksFromLockfile: options.excludeLinksFromLockfile ?? true,
-    peerDependencyRules: {
-      allowAny: options?.peerDependencyRules?.allowAny ?? ['*'],
-      ignoreMissing: options.autoInstallPeers ? [] : options?.peerDependencyRules?.ignoreMissing ?? ['*'],
-    },
     depth: options.updateAll ? Infinity : 0,
     disableRelinkLocalDirDeps: true,
+    hoistPattern,
+    virtualStoreDirMaxLength: VIRTUAL_STORE_DIR_MAX_LENGTH,
+    overrides,
+    peerDependencyRules: {
+      allowAny: ['*'],
+      ignoreMissing: ['*'],
+      ...options.reportOptions?.peerDependencyRules,
+    },
   };
 
   let dependenciesChanged = false;
+  let depsRequiringBuild: DepPath[] | undefined;
   if (!options.dryRun) {
     let stopReporting: Function | undefined;
     if (!options.hidePackageManagerOutput) {
@@ -296,8 +346,13 @@ export async function install(
       await installsRunning[rootDir];
       await restartWorkerPool();
       installsRunning[rootDir] = mutateModules(packagesToBuild, opts);
-      const { stats } = await installsRunning[rootDir];
-      dependenciesChanged = stats.added + stats.removed + stats.linkedToRoot > 0;
+      const installResult = await installsRunning[rootDir];
+      depsRequiringBuild = installResult.depsRequiringBuild?.sort();
+      if (depsRequiringBuild != null) {
+        await addDepsRequiringBuildToLockfile(rootDir, depsRequiringBuild);
+      }
+      dependenciesChanged =
+        installResult.stats.added + installResult.stats.removed + installResult.stats.linkedToRoot > 0;
       delete installsRunning[rootDir];
     } catch (err: any) {
       if (logger) {
@@ -331,13 +386,69 @@ export async function install(
       }
     },
     storeDir: storeController.dir,
+    depsRequiringBuild,
   };
+}
+
+type ScriptPolicyConfig = {
+  allowScripts?: Record<string, boolean | 'warn'>;
+  neverBuiltDependencies?: string[];
+  dangerouslyAllowAllScripts?: boolean;
+};
+
+function resolveScriptPolicies({
+  allowScripts,
+  neverBuiltDependencies,
+  dangerouslyAllowAllScripts,
+}: ScriptPolicyConfig) {
+  let resolvedNeverBuilt = neverBuiltDependencies;
+  let onlyBuiltDependencies: string[] | undefined;
+  let ignoredBuiltDependencies: string[] | undefined;
+  if (dangerouslyAllowAllScripts) {
+    if (resolvedNeverBuilt == null) {
+      // If neverBuiltDependencies is not explicitly set, use a default list
+      // we tell pnpm to allow all scripts to be executed, except the packages listed below.
+      resolvedNeverBuilt = ['core-js'];
+    }
+  } else {
+    onlyBuiltDependencies = [];
+    ignoredBuiltDependencies = [];
+    for (const [packageDescriptor, allowedScript] of Object.entries(allowScripts ?? {})) {
+      switch (allowedScript) {
+        case true:
+          onlyBuiltDependencies.push(packageDescriptor);
+          break;
+        case false:
+          ignoredBuiltDependencies.push(packageDescriptor);
+          break;
+        default:
+          // Ignore any non-boolean values. String values are placeholders that the user
+          // should replace with booleans.
+          // pnpm will print a warning about these during installation.
+          break;
+      }
+    }
+    for (const trustedPkgName of TRUSTED_PACKAGE_NAMES) {
+      if (allowScripts?.[trustedPkgName] == null) {
+        onlyBuiltDependencies.push(trustedPkgName);
+      }
+    }
+    // Add untrusted packages to ignoredBuiltDependencies unless the user explicitly allows them
+    for (const untrustedPkgName of UNTRUSTED_PACKAGE_NAMES) {
+      if (allowScripts?.[untrustedPkgName] !== true) {
+        ignoredBuiltDependencies.push(untrustedPkgName);
+      }
+    }
+  }
+
+  return { neverBuiltDependencies: resolvedNeverBuilt, onlyBuiltDependencies, ignoredBuiltDependencies };
 }
 
 function initReporter(opts?: ReportOptions) {
   return initDefaultReporter({
     context: {
       argv: [],
+      process: opts?.process,
     },
     reportingOptions: {
       appendOnly: opts?.appendOnly ?? false,
@@ -345,8 +456,10 @@ function initReporter(opts?: ReportOptions) {
       hideAddedPkgsProgress: opts?.hideAddedPkgsProgress,
       hideProgressPrefix: opts?.hideProgressPrefix,
       hideLifecycleOutput: opts?.hideLifecycleOutput,
+      approveBuildsInstructionText:
+        'Update the "allowScripts" field under "teambit.dependencies/dependency-resolver" in workspace.jsonc. \nSet to true to allow, false to explicitly disallow. \nExample: allowScripts: { "esbuild": true, "core-js": false }. \nThis is a security-sensitive setting: enabling scripts may allow arbitrary code execution during install.',
     },
-    streamParser,
+    streamParser: streamParser as any, // eslint-disable-line
     // Linked in core aspects are excluded from the output to reduce noise.
     // Other @teambit/ dependencies will be shown.
     // Only those that are symlinked from outside the workspace will be hidden.
@@ -355,24 +468,79 @@ function initReporter(opts?: ReportOptions) {
 }
 
 /**
+ * This function returns the list of hooks that are passed to pnpm
+ * for transforming the manifests of dependencies during installation.
+ */
+export function createReadPackageHooks(options: {
+  rootComponents?: boolean;
+  rootComponentsForCapsules?: boolean;
+  forcedHarmonyVersion?: string;
+}): ReadPackageHook[] {
+  const readPackage: ReadPackageHook[] = [];
+  if (options?.rootComponents && !options?.rootComponentsForCapsules) {
+    readPackage.push(readPackageHook as ReadPackageHook);
+  }
+  readPackage.push(removeLegacyFromDeps as ReadPackageHook);
+  if (!options.forcedHarmonyVersion) {
+    // If the workspace did not specify a harmony version in a root policy,
+    // then we remove harmony from any dependencies, so that the one linked from bvm is used.
+    readPackage.push(removeHarmonyFromDeps as ReadPackageHook);
+  }
+  if (options?.rootComponentsForCapsules) {
+    readPackage.push(readPackageHookForCapsules as ReadPackageHook);
+  }
+  return readPackage;
+}
+
+/**
  * This hook is used when installation is executed inside a capsule.
  * The components in the capsules should get their peer dependencies installed,
  * so this hook converts any peer dependencies into runtime dependencies.
- * Also, any local dependencies are extended with the "injected" option,
- * this tells pnpm to hard link the packages instead of symlinking them.
  */
 function readPackageHookForCapsules(pkg: PackageManifest, workspaceDir?: string): PackageManifest {
   // workspaceDir is set only for workspace packages
   if (workspaceDir) {
-    return readDependencyPackageHook({
+    return {
       ...pkg,
       dependencies: {
         ...pkg.peerDependencies,
         ...pkg.dependencies,
       },
-    });
+    };
   }
-  return readDependencyPackageHook(pkg);
+  return pkg;
+}
+
+/**
+ * @teambit/legacy should never be installed as a dependency.
+ * It is linked from bvm.
+ */
+function removeLegacyFromDeps(pkg: PackageManifest): PackageManifest {
+  if (pkg.dependencies != null) {
+    if (pkg.dependencies['@teambit/legacy'] && !pkg.dependencies['@teambit/legacy'].startsWith('link:')) {
+      delete pkg.dependencies['@teambit/legacy'];
+    }
+  }
+  if (pkg.peerDependencies != null) {
+    if (pkg.peerDependencies['@teambit/legacy']) {
+      delete pkg.peerDependencies['@teambit/legacy'];
+    }
+  }
+  return pkg;
+}
+
+function removeHarmonyFromDeps(pkg: PackageManifest): PackageManifest {
+  if (pkg.dependencies != null) {
+    if (pkg.dependencies['@teambit/harmony'] && !pkg.dependencies['@teambit/harmony'].startsWith('link:')) {
+      delete pkg.dependencies['@teambit/harmony'];
+    }
+  }
+  if (pkg.peerDependencies != null) {
+    if (pkg.peerDependencies['@teambit/harmony']) {
+      delete pkg.peerDependencies['@teambit/harmony'];
+    }
+  }
+  return pkg;
 }
 
 /**
@@ -386,28 +554,10 @@ function readPackageHook(pkg: PackageManifest, workspaceDir?: string): PackageMa
     return pkg;
   }
   // workspaceDir is set only for workspace packages
-  if (workspaceDir && !workspaceDir.includes('.bit_roots')) {
+  if (workspaceDir && !workspaceDir.includes(BIT_ROOTS_DIR)) {
     return readWorkspacePackageHook(pkg);
   }
-  return readDependencyPackageHook(pkg);
-}
-
-/**
- * This hook adds the "injected" option to any workspace dependency.
- * The injected option tell pnpm to hard link the packages instead of symlinking them.
- */
-function readDependencyPackageHook(pkg: PackageManifest): PackageManifest {
-  const dependenciesMeta = pkg.dependenciesMeta ?? {};
-  for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {
-    if (version.startsWith('workspace:')) {
-      // This instructs pnpm to hard link the component from the workspace, not symlink it.
-      dependenciesMeta[name] = { injected: true };
-    }
-  }
-  return {
-    ...pkg,
-    dependenciesMeta,
-  };
+  return pkg;
 }
 
 /**
@@ -434,7 +584,10 @@ function readWorkspacePackageHook(pkg: PackageManifest): PackageManifest {
 }
 
 function groupPkgs(manifestsByPaths: Record<string, ProjectManifest>, opts: { update?: boolean }) {
-  const pkgs = Object.entries(manifestsByPaths).map(([dir, manifest]) => ({ dir, manifest }));
+  const pkgs = Object.entries(manifestsByPaths).map(([rootDir, manifest]) => ({
+    rootDir: rootDir as ProjectRootDir,
+    manifest,
+  }));
   const { graph } = createPkgGraph(pkgs);
   const chunks = sortPackages(graph as any);
 
@@ -451,7 +604,6 @@ function groupPkgs(manifestsByPaths: Record<string, ProjectManifest>, opts: { up
   // This is the rational behind not deleting this completely, but need further check that it really works
   const packagesToBuild: MutatedProject[] = []; // @pnpm/core will use this to install the packages
   const allProjects: ProjectOptions[] = [];
-  const workspacePackages = {}; // @pnpm/core will use this to link packages to each other
 
   chunks.forEach((dirs, buildIndex) => {
     for (const rootDir of dirs) {
@@ -466,24 +618,36 @@ function groupPkgs(manifestsByPaths: Record<string, ProjectManifest>, opts: { up
         mutation: 'install',
         update: opts.update,
       });
-      if (manifest.name) {
-        workspacePackages[manifest.name] = workspacePackages[manifest.name] || {};
-        workspacePackages[manifest.name][manifest.version] = { dir: rootDir, manifest };
-      }
     }
   });
-  return { packagesToBuild, allProjects, workspacePackages };
+  return { packagesToBuild, allProjects };
 }
 
 export async function resolveRemoteVersion(
   packageName: string,
-  rootDir: string,
-  cacheDir: string,
-  registries: Registries,
-  proxyConfig: PackageManagerProxyConfig = {},
-  networkConfig: PackageManagerNetworkConfig = {}
+  {
+    rootDir,
+    cacheDir,
+    fullMetadata,
+    registries,
+    proxyConfig,
+    networkConfig,
+  }: {
+    rootDir: string;
+    cacheDir: string;
+    fullMetadata?: boolean;
+    registries: Registries;
+    proxyConfig?: PackageManagerProxyConfig;
+    networkConfig?: PackageManagerNetworkConfig;
+  }
 ): Promise<ResolvedPackageVersion> {
-  const { resolve } = await generateResolverAndFetcher(cacheDir, registries, proxyConfig, networkConfig);
+  const { resolve } = await generateResolverAndFetcher({
+    cacheDir,
+    fullMetadata,
+    networkConfig,
+    proxyConfig,
+    registries,
+  });
   const resolveOpts = {
     lockfileDir: rootDir,
     preferredVersions: {},
@@ -492,13 +656,10 @@ export async function resolveRemoteVersion(
   };
   try {
     const parsedPackage = parsePackageName(packageName);
-    const registriesMap = getRegistriesMap(registries);
-    const registry = pickRegistryForPackage(registriesMap, parsedPackage.name);
     const wantedDep: WantedDependency = {
       alias: parsedPackage.name,
-      pref: parsedPackage.version,
+      bareSpecifier: parsedPackage.version,
     };
-    resolveOpts.registry = registry;
     const val = await resolve(wantedDep, resolveOpts);
     if (!val.manifest) {
       throw new BitError('The resolved package has no manifest');
@@ -512,6 +673,7 @@ export async function resolveRemoteVersion(
       wantedRange,
       isSemver: true,
       resolvedVia: val.resolvedVia,
+      manifest: val.manifest,
     };
   } catch (e: any) {
     if (!e.message?.includes('is not a valid string')) {
@@ -520,89 +682,44 @@ export async function resolveRemoteVersion(
     // The provided package is probably a git url or path to a folder
     const wantedDep: WantedDependency = {
       alias: undefined,
-      pref: packageName,
+      bareSpecifier: packageName,
     };
     const val = await resolve(wantedDep, resolveOpts);
     if (!val.manifest) {
       throw new BitError('The resolved package has no manifest');
     }
-    if (!val.normalizedPref) {
+    if (!val.normalizedBareSpecifier) {
       throw new BitError('The resolved package has no version');
     }
     return {
       packageName: val.manifest.name,
-      version: val.normalizedPref,
+      version: val.normalizedBareSpecifier,
       isSemver: false,
       resolvedVia: val.resolvedVia,
+      manifest: val.manifest,
     };
   }
 }
 
-function getRegistriesMap(registries: Registries): RegistriesMap {
-  const registriesMap = {
-    default: registries.defaultRegistry.uri || NPM_REGISTRY,
+async function addDepsRequiringBuildToLockfile(rootDir: string, depsRequiringBuild: string[]) {
+  const lockfile = (await readWantedLockfile(rootDir, { ignoreIncompatible: true })) as BitLockfile;
+  if (lockfile == null) return;
+  if (isEqual(lockfile.bit?.depsRequiringBuild, depsRequiringBuild)) return;
+  lockfile.bit = {
+    ...lockfile.bit,
+    depsRequiringBuild,
   };
-
-  Object.entries(registries.scopes).forEach(([registryName, registry]) => {
-    registriesMap[`@${registryName}`] = registry.uri;
-  });
-  return registriesMap;
+  await writeWantedLockfile(rootDir, lockfile);
 }
 
-function getAuthConfig(registries: Registries): Record<string, any> {
-  const res: any = {};
-  res.registry = registries.defaultRegistry.uri;
-  if (registries.defaultRegistry.alwaysAuth) {
-    res['always-auth'] = true;
-  }
-  const defaultAuthTokens = getAuthTokenForRegistry(registries.defaultRegistry, true);
-  defaultAuthTokens.forEach(({ keyName, val }) => {
-    res[keyName] = val;
-  });
-
-  Object.entries(registries.scopes).forEach(([, registry]) => {
-    const authTokens = getAuthTokenForRegistry(registry);
-    authTokens.forEach(({ keyName, val }) => {
-      res[keyName] = val;
-    });
-    if (registry.alwaysAuth) {
-      const nerfed = toNerfDart(registry.uri);
-      const alwaysAuthKeyName = `${nerfed}:always-auth`;
-      res[alwaysAuthKeyName] = true;
-    }
-  });
-  return res;
+export interface BitLockfile extends LockfileObject {
+  bit?: BitLockfileAttributes;
 }
 
-function getAuthTokenForRegistry(registry: Registry, isDefault = false): { keyName: string; val: string }[] {
-  const nerfed = toNerfDart(registry.uri);
-  if (registry.originalAuthType === 'authToken') {
-    return [
-      {
-        keyName: `${nerfed}:_authToken`,
-        val: registry.originalAuthValue || '',
-      },
-    ];
-  }
-  if (registry.originalAuthType === 'auth') {
-    return [
-      {
-        keyName: isDefault ? '_auth' : `${nerfed}:_auth`,
-        val: registry.originalAuthValue || '',
-      },
-    ];
-  }
-  if (registry.originalAuthType === 'user-pass') {
-    return [
-      {
-        keyName: `${nerfed}:username`,
-        val: registry.originalAuthValue?.split(':')[0] || '',
-      },
-      {
-        keyName: `${nerfed}:_password`,
-        val: registry.originalAuthValue?.split(':')[1] || '',
-      },
-    ];
-  }
-  return [];
+export interface BitLockfileFile extends LockfileFile {
+  bit?: BitLockfileAttributes;
+}
+
+export interface BitLockfileAttributes {
+  depsRequiringBuild: string[];
 }

@@ -1,12 +1,17 @@
-import { ScopeMain } from '@teambit/scope';
-import { Workspace } from '@teambit/workspace';
-import { Lane, Version } from '@teambit/legacy/dist/scope/models';
+import type { ScopeMain } from '@teambit/scope';
+import type { Workspace } from '@teambit/workspace';
+import type { HistoryItem, Lane, LaneHistory, Version } from '@teambit/objects';
+import { Ref } from '@teambit/objects';
 import { ComponentID, ComponentIdList } from '@teambit/component-id';
-import { Ref } from '@teambit/legacy/dist/scope/objects';
-import { DiffResults, DiffOptions } from '@teambit/legacy/dist/consumer/component-ops/components-diff';
+import type { DiffResults, DiffOptions } from '@teambit/legacy.component-diff';
+import { outputDiffResults } from '@teambit/legacy.component-diff';
+import type { LaneId } from '@teambit/lane-id';
 import { DEFAULT_LANE } from '@teambit/lane-id';
 import { BitError } from '@teambit/bit-error';
-import { ComponentCompareMain } from '@teambit/component-compare';
+import type { ComponentCompareMain } from '@teambit/component-compare';
+import chalk from 'chalk';
+import pMap from 'p-map';
+import { concurrentComponentsLimit } from '@teambit/harmony.modules.concurrency';
 
 type LaneData = {
   name: string;
@@ -113,13 +118,73 @@ export class LaneDiffGenerator {
       reason: `for the "from" diff - ${fromLane ? fromLane.name : DEFAULT_LANE}`,
     });
 
-    await Promise.all(
-      this.toLaneData.components.map(async ({ id, head }) => {
+    // Build an index of fromLaneData for O(1) lookups instead of repeated O(N) .find() calls.
+    const fromLaneIndex = new Map<string, Ref>();
+    for (const comp of this.fromLaneData.components) {
+      fromLaneIndex.set(comp.id.toStringWithoutVersion(), comp.head);
+    }
+
+    // Fork-point computation only applies when comparing a lane against main (default lane).
+    // When comparing two non-default lanes, use direct head-to-head comparison.
+    const useForkPoint = fromLaneId.isDefault() || toLaneId.isDefault();
+    const commonSnapMap = new Map<string, { ref: Ref; id: ComponentID }>();
+
+    if (useForkPoint) {
+      // Find the common snap (merge-base / fork-point) for each component.
+      // This ensures `lane diff` shows only changes made on the lane, not changes that happened on
+      // main after the lane was created.
+      // When a pattern is provided, only compute fork-points for the matching subset.
+      const componentsToProcess = idsToCheckDiff
+        ? this.toLaneData.components.filter(({ id }) => idsToCheckDiff.hasWithoutVersion(id))
+        : this.toLaneData.components;
+      await pMap(
+        componentsToProcess,
+        async ({ id, head }) => {
+          if (!head) return;
+          const fromHead = fromLaneIndex.get(id.toStringWithoutVersion());
+          if (!fromHead || fromHead.isEqual(head)) return;
+          try {
+            const snapsDistance = await this.scope.getSnapsDistanceBetweenTwoSnaps(
+              id,
+              head.toString(),
+              fromHead.toString(),
+              false
+            );
+            if (snapsDistance?.commonSnapBeforeDiverge) {
+              commonSnapMap.set(id.toStringWithoutVersion(), { ref: snapsDistance.commonSnapBeforeDiverge, id });
+            }
+          } catch {
+            // if we can't determine the common snap, fall back to comparing against the current head
+          }
+        },
+        { concurrency: concurrentComponentsLimit() }
+      );
+
+      // Import the common snap versions so we can diff against them
+      if (commonSnapMap.size > 0) {
+        const commonSnapsToImport = [...commonSnapMap.values()].map((s) => s.id.changeVersion(s.ref.hash));
+        const sourceOrTargetLane = (toLane || fromLane) ?? undefined;
+        await this.scope.legacyScope.scopeImporter.importWithoutDeps(ComponentIdList.fromArray(commonSnapsToImport), {
+          cache: true,
+          lane: sourceOrTargetLane,
+          ignoreMissingHead: true,
+          reason: 'for the common snap (fork-point) of lane diff',
+        });
+      }
+    }
+
+    await pMap(
+      this.toLaneData.components,
+      async ({ id, head }) => {
         if (idsToCheckDiff && !idsToCheckDiff.hasWithoutVersion(id)) {
           return;
         }
-        await this.componentDiff(id, head, diffOptions);
-      })
+        const idKey = id.toStringWithoutVersion();
+        const forkPoint = commonSnapMap.get(idKey)?.ref;
+        const fromHead = fromLaneIndex.get(idKey);
+        await this.componentDiff(id, head, diffOptions, true, forkPoint, fromHead);
+      },
+      { concurrency: concurrentComponentsLimit() }
     );
 
     return {
@@ -133,10 +198,118 @@ export class LaneDiffGenerator {
     };
   }
 
-  private async componentDiff(id: ComponentID, toLaneHead: Ref | null, diffOptions: DiffOptions) {
+  async generateDiffHistory(
+    lane: Lane,
+    laneHistory: LaneHistory,
+    fromHistoryId: string,
+    toHistoryId: string,
+    pattern?: string
+  ): Promise<LaneDiffResults> {
+    const laneId = lane.toLaneId();
+    const history = laneHistory.getHistory();
+    const fromLane = history[fromHistoryId];
+    const toLane = history[toHistoryId];
+    if (!fromLane)
+      throw new Error(`unable to find the from-history-id "${fromHistoryId}" in lane "${laneId.toString()}"`);
+    if (!toLane) throw new Error(`unable to find the to-history-id "${toHistoryId}" in lane "${laneId.toString()}"`);
+    this.fromLaneData = this.mapHistoryToLaneData(laneId, fromHistoryId, fromLane);
+    this.toLaneData = this.mapHistoryToLaneData(laneId, toHistoryId, toLane);
+
+    let idsToCheckDiff: ComponentIdList | undefined;
+    if (pattern) {
+      const compIds = this.toLaneData.components.map((c) => c.id);
+      idsToCheckDiff = ComponentIdList.fromArray(await this.scope.filterIdsFromPoolIdsByPattern(pattern, compIds));
+    }
+
+    if (!this.toLaneData.components.length) {
+      throw new BitError(`lane-history "${toHistoryId}" is empty, nothing to show`);
+    }
+
+    const idsOfTo = ComponentIdList.fromArray(
+      this.toLaneData.components.map((c) => c.id.changeVersion(c.head?.toString()))
+    );
+    const idsOfFrom = ComponentIdList.fromArray(
+      this.fromLaneData.components.map((c) => c.id.changeVersion(c.head?.toString()))
+    );
+    const importer = this.scope.legacyScope.scopeImporter;
+    await importer.importWithoutDeps(idsOfTo, {
+      cache: true,
+      lane,
+      ignoreMissingHead: true,
+      reason: `for the "to" diff - ${laneId.toString()}-${toHistoryId}`,
+    });
+    await importer.importWithoutDeps(idsOfFrom, {
+      cache: true,
+      lane,
+      ignoreMissingHead: true,
+      reason: `for the "from" diff - ${laneId.toString()}-${fromHistoryId}`,
+    });
+
+    await pMap(
+      this.toLaneData.components,
+      async ({ id, head }) => {
+        if (idsToCheckDiff && !idsToCheckDiff.hasWithoutVersion(id)) {
+          return;
+        }
+        try {
+          await this.componentDiff(id, head);
+        } catch (err: any) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.failures.push({ id, msg: message });
+        }
+      },
+      { concurrency: concurrentComponentsLimit() }
+    );
+
+    return {
+      newCompsFrom: this.newCompsFrom.map((id) => id.toString()),
+      newCompsTo: this.newCompsTo.map((id) => id.toString()),
+      compsWithDiff: this.compsWithDiff,
+      compsWithNoChanges: this.compsWithNoChanges.map((id) => id.toString()),
+      toLaneName: this.toLaneData.name,
+      fromLaneName: this.fromLaneData.name,
+      failures: this.failures,
+    };
+  }
+
+  laneDiffResultsToString(laneDiffResults: LaneDiffResults): string {
+    const { compsWithDiff, newCompsFrom, newCompsTo, toLaneName, fromLaneName, failures } = laneDiffResults;
+
+    const newCompsOutput = (laneName: string, ids: string[]) => {
+      if (!ids.length) return '';
+      const newCompsIdsStr = ids.map((id) => chalk.bold(id)).join('\n');
+      const newCompsTitle = `\nThe following components were introduced in ${chalk.bold(laneName)} lane`;
+      return `${chalk.inverse(newCompsTitle)}\n${newCompsIdsStr}`;
+    };
+
+    const diffResultsStr = outputDiffResults(compsWithDiff);
+
+    const failuresTitle = `\n\nDiff failed on the following component(s)`;
+    const failuresIds = failures.map((f) => `${f.id.toString()} - ${chalk.red(f.msg)}`).join('\n');
+    const failuresStr = failures.length ? `${chalk.inverse(failuresTitle)}\n${failuresIds}` : '';
+    const newCompsToStr = newCompsOutput(toLaneName, newCompsTo);
+
+    const newCompsFromStr = newCompsOutput(fromLaneName, newCompsFrom);
+
+    return `${diffResultsStr}${newCompsToStr}${newCompsFromStr}${failuresStr}`;
+  }
+
+  private async componentDiff(
+    id: ComponentID,
+    toLaneHead: Ref | null,
+    diffOptions: DiffOptions = {},
+    compareToHeadIfEmpty = false,
+    forkPoint?: Ref,
+    fromHead?: Ref
+  ) {
     const modelComponent = await this.scope.legacyScope.getModelComponent(id);
-    const fromLaneHead =
-      this.fromLaneData.components.find((c) => c.id.isEqualWithoutVersion(id))?.head || modelComponent.head;
+    const foundFromLane = fromHead ?? this.fromLaneData.components.find((c) => c.id.isEqualWithoutVersion(id))?.head;
+    // Use the fork-point when available, so the diff only shows changes made on the
+    // "to" lane rather than also including changes that happened on the "from" lane since the fork.
+    let fromLaneHead: Ref | null | undefined = forkPoint;
+    if (!fromLaneHead) {
+      fromLaneHead = compareToHeadIfEmpty ? foundFromLane || modelComponent.head : foundFromLane;
+    }
     if (!fromLaneHead) {
       this.newCompsTo.push(id);
       return;
@@ -229,6 +402,55 @@ export class LaneDiffGenerator {
         version: lc.id.version?.toString(),
       })),
       remote: lane.toLaneId().toString(),
+    };
+  }
+
+  /**
+   * Check whether a history entry has no components (e.g. the initial "new lane" entry).
+   */
+  isHistoryEntryEmpty(laneHistory: LaneHistory, historyId: string): boolean {
+    const entry = laneHistory.getHistory()[historyId];
+    return !entry || !entry.components.length;
+  }
+
+  /**
+   * Check whether a history entry's version objects are available locally (after attempting import).
+   * Entries with no components (e.g. "new lane") are always considered available.
+   */
+  async isHistoryEntryAvailable(lane: Lane, laneHistory: LaneHistory, historyId: string): Promise<boolean> {
+    const history = laneHistory.getHistory();
+    const entry = history[historyId];
+    if (!entry || !entry.components.length) return true;
+
+    const laneId = lane.toLaneId();
+    const laneData = this.mapHistoryToLaneData(laneId, historyId, entry);
+
+    const ids = ComponentIdList.fromArray(laneData.components.map((c) => c.id.changeVersion(c.head?.toString())));
+    await this.scope.legacyScope.scopeImporter.importWithoutDeps(ids, {
+      cache: true,
+      lane,
+      ignoreMissingHead: true,
+      reason: `checking availability of history entry ${historyId}`,
+    });
+
+    const repo = this.scope.legacyScope.objects;
+    const headsToCheck = laneData.components.map((c) => c.head).filter((h): h is Ref => Boolean(h));
+    if (!headsToCheck.length) return true;
+    const existing = await repo.hasMultiple(headsToCheck);
+    return existing.length === headsToCheck.length;
+  }
+
+  private mapHistoryToLaneData(laneId: LaneId, historyId: string, historyItem: HistoryItem): LaneData {
+    return {
+      name: historyId,
+      components: historyItem.components.map((compStr) => {
+        const compId = ComponentID.fromString(compStr);
+        return {
+          id: compId.changeVersion(undefined),
+          head: Ref.from(compId.version),
+        };
+      }),
+      remote: laneId.toString(),
     };
   }
 }

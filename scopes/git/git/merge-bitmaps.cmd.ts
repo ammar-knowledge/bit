@@ -1,6 +1,6 @@
-import { Command, CommandOptions } from '@teambit/cli';
-import chalk from 'chalk';
-import { GitMain } from './git.main.runtime';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatSuccessSummary, errorSymbol } from '@teambit/cli';
+import type { GitMain } from './git.main.runtime';
 
 const COMMAND_NAME = 'merge-bitmaps';
 
@@ -13,7 +13,7 @@ export class MergeBitmapsCmd implements Command {
   alias = '';
   description = `a special command to merge conflicting bitmap files during git merge`;
   options = [] as CommandOptions;
-  group = 'git';
+  group = 'workspace-tools';
   commands: Command[] = [];
   private = true;
   // helpUrl = '';
@@ -23,8 +23,8 @@ export class MergeBitmapsCmd implements Command {
   async report([ancestor, current, other]: string[]) {
     const res = await this.git.mergeBitmaps(ancestor, current, other);
     if (res) {
-      return chalk.green('git merge driver was successfully set');
+      return formatSuccessSummary('bitmap files merged successfully');
     }
-    return chalk.red('git merge driver was not set');
+    return `${errorSymbol} bitmap merge failed`;
   }
 }

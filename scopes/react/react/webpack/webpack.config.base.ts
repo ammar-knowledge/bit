@@ -3,15 +3,17 @@ import { sep } from 'path';
 import 'style-loader';
 import MiniCssExtractPlugin from 'mini-css-extract-plugin';
 import getCSSModuleLocalIdent from 'react-dev-utils/getCSSModuleLocalIdent';
-import { Configuration, IgnorePlugin } from 'webpack';
+import type { Configuration } from 'webpack';
+import { IgnorePlugin } from 'webpack';
 import * as stylesRegexps from '@teambit/webpack.modules.style-regexps';
 import { generateStyleLoaders } from '@teambit/webpack.modules.generate-style-loaders';
 import { postCssConfig } from './postcss.config';
 // Make sure the bit-react-transformer is a dependency
 // TODO: remove it once we can set policy from component to component then set it via the component.json
 import '@teambit/react.babel.bit-react-transformer';
-// Make sure the mdx-loader is a dependency
-import '@teambit/mdx.modules.mdx-loader';
+// eslint-disable-next-line import/no-unresolved
+import '@mdx-js/loader';
+import { mdxOptions } from '@teambit/mdx.modules.mdx-v3-options';
 
 const styleLoaderPath = require.resolve('style-loader');
 
@@ -71,8 +73,8 @@ export default function (isEnvProduction = false): Configuration {
       extensions: moduleFileExtensions.map((ext) => `.${ext}`),
 
       alias: {
-        'react/jsx-dev-runtime': require.resolve('react/jsx-dev-runtime.js'),
-        'react/jsx-runtime': require.resolve('react/jsx-runtime.js'),
+        'react/jsx-dev-runtime': require.resolve('react/jsx-dev-runtime'),
+        'react/jsx-runtime': require.resolve('react/jsx-runtime'),
         'react-dom/server': require.resolve('react-dom/server'),
         // Allows for better profiling with ReactDevTools
         ...(isEnvProductionProfile && {
@@ -156,7 +158,12 @@ export default function (isEnvProduction = false): Configuration {
                   },
                 },
                 {
-                  loader: require.resolve('@teambit/mdx.modules.mdx-loader'),
+                  loader: require.resolve('@mdx-js/loader'),
+                  options: mdxOptions,
+                },
+                {
+                  // inlined @teambit/mdx.modules.mdx-pre-loader in CJS format
+                  loader: require.resolve('./mdx-pre-loader.cjs'),
                 },
               ],
             },
@@ -325,7 +332,6 @@ export default function (isEnvProduction = false): Configuration {
         },
       ],
     },
-    // @ts-ignore
     plugins: [
       isEnvProduction &&
         new MiniCssExtractPlugin({

@@ -4,6 +4,7 @@
   align-items: center;
   justify-content: center;
   height: 100%;
+  width: 100%;
   color: #c7c7c7;
   pointer-events: auto;
   > span:first-child {
@@ -75,4 +76,92 @@
   height: 100%;
   z-index: 100;
   cursor: pointer;
+}
+
+// ── Viewport gate & skeleton overlay ────────────────────────────────────────
+
+.previewCard {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.viewportGate {
+  width: 100%;
+  height: 100%;
+}
+
+.skeletonOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  background: var(--surface-color, #ffffff);
+}
+
+// ── Browser-chrome skeleton ─────────────────────────────────────────────────
+
+.browserSkeleton {
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.browserToolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-bottom: 1px solid currentColor;
+  opacity: 0.08;
+  flex-shrink: 0;
+}
+
+.browserDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.browserUrlBar {
+  flex: 1;
+  height: 14px;
+  margin-left: 8px;
+  border-radius: 10px;
+  background: currentColor;
+}
+
+.browserBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 14px;
+  opacity: 0.06;
+
+  > * {
+    height: 10px;
+    border-radius: 6px;
+    background: currentColor;
+  }
+}
+
+.browserLine1 {
+  width: 55%;
+}
+.browserLine2 {
+  width: 75%;
+}
+.browserLine3 {
+  width: 40%;
+}
+.browserLine4 {
+  width: 65%;
 }

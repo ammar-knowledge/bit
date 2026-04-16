@@ -1,11 +1,7 @@
-import {
-  DEPENDENCIES_FIELDS,
-  MANUALLY_ADD_DEPENDENCY,
-  MANUALLY_REMOVE_DEPENDENCY,
-} from '@teambit/legacy/dist/constants';
-import logger from '@teambit/legacy/dist/logger/logger';
-import Component, { ManuallyChangedDependencies } from '@teambit/legacy/dist/consumer/component/consumer-component';
-import { FileType } from './auto-detect-deps';
+import { DEPENDENCIES_FIELDS, MANUALLY_ADD_DEPENDENCY, MANUALLY_REMOVE_DEPENDENCY } from '@teambit/legacy.constants';
+import { logger } from '@teambit/legacy.logger';
+import type { ConsumerComponent as Component, ManuallyChangedDependencies } from '@teambit/legacy.consumer-component';
+import type { FileType } from './auto-detect-deps';
 
 export default class OverridesDependencies {
   component: Component;
@@ -13,9 +9,14 @@ export default class OverridesDependencies {
   manuallyRemovedDependencies: ManuallyChangedDependencies;
   manuallyAddedDependencies: ManuallyChangedDependencies;
   missingPackageDependencies: string[];
+  /**
+   * package names of env-own dependencies (from env.jsonc selfPolicy).
+   * used by version resolution to skip these overrides for workspace components,
+   * so their version is resolved from the bitmap instead of the static env.jsonc version.
+   */
+  envOwnPkgNames: Set<string> = new Set();
   constructor(component: Component) {
     this.component = component;
-    // @ts-ignore AUTO-ADDED-AFTER-MIGRATION-PLEASE-FIX!
     this.componentFromModel = this.component.componentFromModel;
     this.manuallyRemovedDependencies = {};
     this.manuallyAddedDependencies = {};

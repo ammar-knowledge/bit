@@ -1,7 +1,11 @@
-import { Command, CommandOptions } from '@teambit/cli';
-import { ComponentConfig } from '@teambit/generator';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatItem, formatSuccessSummary, joinSections } from '@teambit/cli';
+import type { ComponentConfig } from '@teambit/generator';
 import chalk from 'chalk';
-import { ForkingMain } from '.';
+import { hasWildcard } from '@teambit/legacy.utils';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { WorkspaceComponentLoadOptions } from '@teambit/workspace';
+import type { ForkingMain } from './forking.main.runtime';
 
 export type ForkOptions = {
   scope?: string;
@@ -14,18 +18,29 @@ export type ForkOptions = {
   env?: string;
   config?: ComponentConfig;
   ast?: boolean;
+  compile?: boolean;
+  loadOptions?: WorkspaceComponentLoadOptions;
 };
 
 export class ForkCmd implements Command {
-  name = 'fork <source-component-id> [target-component-name]';
-  description = 'create a new component forked from an existing one (copies source files and configs)';
+  name = 'fork <pattern> [target-component-name]';
+  description = 'create a new component by copying from an existing one';
+  extendedDescription = `duplicates an existing component's source files and configuration to create a new independent component.
+useful for creating variations or starting development from a similar component.
+automatically handles import/require statement updates and provides refactoring options.
+
+when using a pattern, all matching components are forked with the same name to a target scope.
+the target-component-name argument is not allowed when using patterns.`;
   helpUrl = 'docs/getting-started/collaborate/importing-components#fork-a-component';
   arguments = [
-    { name: 'source-component-id', description: 'the component id of the source component' },
+    {
+      name: 'pattern',
+      description: COMPONENT_PATTERN_HELP,
+    },
     {
       name: 'target-component-name',
       description:
-        "the name for the new component (component name without scope, e.g. name/spaces/my-button). to set a different scope, use the '--scope' flag",
+        "the name for the new component (component name without scope, e.g. name/spaces/my-button). to set a different scope, use the '--scope' flag. not allowed when using patterns",
     },
   ];
   group = 'collaborate';
@@ -49,14 +64,22 @@ export class ForkCmd implements Command {
     ],
     ['', 'preserve', 'avoid refactoring file and variable/class names according to the new component name'],
     ['', 'no-link', 'avoid saving a reference to the original component'],
-    ['', 'ast', 'EXPERIMENTAL. use ast to transform files instead of regex'],
+    ['', 'ast', 'use ast to transform files instead of regex'],
   ] as CommandOptions;
 
   example: [
     {
       cmd: 'fork teambit.base-ui/input/button ui/button';
       description: "create a component named 'ui/button', forked from the remote 'input/button' component";
-    }
+    },
+    {
+      cmd: 'fork "teambit.base-ui/**" --scope my-org.my-scope';
+      description: 'fork all components from teambit.base-ui scope to my-org.my-scope';
+    },
+    {
+      cmd: 'fork "my-org.utils/string/**"';
+      description: 'fork all string utility components to the workspace default scope';
+    },
   ];
   loader = true;
   remoteOp = true;
@@ -64,8 +87,25 @@ export class ForkCmd implements Command {
   constructor(private forking: ForkingMain) {}
 
   async report([sourceId, targetId]: [string, string], options: ForkOptions): Promise<string> {
-    const results = await this.forking.fork(sourceId, targetId, options);
-    const targetIdStr = results.toString();
-    return chalk.green(`successfully forked ${chalk.bold(targetIdStr)} from ${chalk.bold(sourceId)}`);
+    const isPattern = hasWildcard(sourceId) || sourceId.includes(',');
+
+    if (isPattern) {
+      // Pattern mode - fork multiple components
+      if (targetId) {
+        throw new Error('target-component-name is not allowed when using patterns');
+      }
+
+      const results = await this.forking.forkByPattern(sourceId, options);
+      const items = results.map((id) => formatItem(id.toString()));
+      return joinSections([
+        formatSuccessSummary(`forked ${results.length} component(s) matching pattern ${chalk.bold(sourceId)}`),
+        items.join('\n'),
+      ]);
+    }
+
+    // Single component mode - original behavior
+    const result = await this.forking.fork(sourceId, targetId, options);
+    const targetIdStr = result.toString();
+    return formatSuccessSummary(`forked ${chalk.bold(targetIdStr)} from ${chalk.bold(sourceId)}`);
   }
 }

@@ -1,16 +1,17 @@
 import mapSeries from 'p-map-series';
 import path from 'path';
 import fs from 'fs-extra';
-import { MainAspect, AspectLoaderMain } from '@teambit/aspect-loader';
-import { ComponentMap } from '@teambit/component';
-import { Logger } from '@teambit/logger';
-import { PathAbsolute } from '@teambit/legacy/dist/utils/path';
-import { PeerDependencyRules, ProjectManifest } from '@pnpm/types';
+import type { MainAspect, AspectLoaderMain } from '@teambit/aspect-loader';
+import type { ComponentMap } from '@teambit/component';
+import { type DependenciesGraph } from '@teambit/objects';
+import type { Logger } from '@teambit/logger';
+import type { PathAbsolute } from '@teambit/toolbox.path.path';
+import type { PeerDependencyRules, ProjectManifest } from '@pnpm/types';
 import { MainAspectNotInstallable, RootDirNotDefined } from './exceptions';
-import { PackageManager, PackageManagerInstallOptions, PackageImportMethod } from './package-manager';
-import { WorkspacePolicy } from './policy';
-import { CreateFromComponentsOptions } from './manifest';
-import { DependencyResolverMain } from './dependency-resolver.main.runtime';
+import type { PackageManager, PackageManagerInstallOptions, PackageImportMethod } from './package-manager';
+import type { WorkspacePolicy } from './policy';
+import type { CreateFromComponentsOptions } from './manifest';
+import type { DependencyResolverMain } from './dependency-resolver.main.runtime';
 
 const DEFAULT_PM_INSTALL_OPTIONS: PackageManagerInstallOptions = {
   dedupe: true,
@@ -41,9 +42,10 @@ export type InstallOptions = {
   packageManagerConfigRootDir?: string;
   resolveVersionsFromDependenciesOnly?: boolean;
   linkedDependencies?: Record<string, Record<string, string>>;
-  forceTeambitHarmonyLink?: boolean;
+  forcedHarmonyVersion?: string;
   excludeExtensionsDependencies?: boolean;
   dedupeInjectedDeps?: boolean;
+  dependenciesGraph?: DependenciesGraph;
 };
 
 export type GetComponentManifestsOptions = {
@@ -52,11 +54,17 @@ export type GetComponentManifestsOptions = {
   rootDir: string;
   resolveVersionsFromDependenciesOnly?: boolean;
   referenceLocalPackages?: boolean;
+  includeAllEnvPeers?: boolean;
   hasRootComponents?: boolean;
   excludeExtensionsDependencies?: boolean;
 } & Pick<
   PackageManagerInstallOptions,
-  'dedupe' | 'dependencyFilterFn' | 'copyPeerToRuntimeOnComponents' | 'copyPeerToRuntimeOnRoot' | 'installPeersFromEnvs'
+  | 'dedupe'
+  | 'dependencyFilterFn'
+  | 'copyPeerToRuntimeOnComponents'
+  | 'copyPeerToRuntimeOnRoot'
+  | 'installPeersFromEnvs'
+  | 'resolveEnvPeersFromRoot'
 >;
 
 export type PreInstallSubscriber = (installer: DependencyInstaller, installArgs: InstallArgs) => Promise<void>;
@@ -100,7 +108,15 @@ export class DependencyInstaller {
 
     private neverBuiltDependencies?: string[],
 
+    private allowScripts?: Record<string, boolean | 'warn'>,
+
+    private dangerouslyAllowAllScripts?: boolean,
+
     private preferOffline?: boolean,
+
+    private minimumReleaseAge?: number,
+
+    private minimumReleaseAgeExclude?: string[],
 
     private installingContext: DepInstallerContext = {}
   ) {}
@@ -116,13 +132,14 @@ export class DependencyInstaller {
     if (!finalRootDir) {
       throw new RootDirNotDefined();
     }
-    const manifests = await this.getComponentManifests({
+    const { manifests } = await this.getComponentManifests({
       ...packageManagerOptions,
       componentDirectoryMap,
       rootPolicy,
       rootDir: finalRootDir,
       resolveVersionsFromDependenciesOnly: options.resolveVersionsFromDependenciesOnly,
       referenceLocalPackages: packageManagerOptions.rootComponentsForCapsules,
+      includeAllEnvPeers: packageManagerOptions.rootComponentsForCapsules,
       excludeExtensionsDependencies: options.excludeExtensionsDependencies,
     });
     return this.installComponents(
@@ -162,6 +179,10 @@ export class DependencyInstaller {
         JSON.stringify(options.linkedDependencies)
       ) as typeof options.linkedDependencies;
       if (linkedDependencies[finalRootDir]) {
+        if (options.forcedHarmonyVersion == null && manifests[finalRootDir].dependencies?.['@teambit/harmony']) {
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          delete manifests[finalRootDir].dependencies!['@teambit/harmony'];
+        }
         const directDeps = new Set<string>();
         Object.values(manifests).forEach((manifest) => {
           for (const depName of Object.keys({ ...manifest.dependencies, ...manifest.devDependencies })) {
@@ -172,10 +193,6 @@ export class DependencyInstaller {
           if (manifest.name && directDeps.has(manifest.name)) {
             delete linkedDependencies[finalRootDir][manifest.name];
           }
-        }
-        if (options.forceTeambitHarmonyLink && manifests[finalRootDir].dependencies?.['@teambit/harmony']) {
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          delete manifests[finalRootDir].dependencies!['@teambit/harmony'];
         }
       }
       Object.entries(linkedDependencies).forEach(([dir, linkedDeps]) => {
@@ -188,7 +205,9 @@ export class DependencyInstaller {
         };
       });
     }
-    const hidePackageManagerOutput = !!(this.installingContext.inCapsule && process.env.VERBOSE_PM_OUTPUT !== 'true');
+    const isJsonCmd = process.argv.includes('--json') || process.argv.includes('-j');
+    const hidePackageManagerOutput =
+      Boolean(this.installingContext.inCapsule && process.env.VERBOSE_PM_OUTPUT !== 'true') || isJsonCmd;
 
     // Make sure to take other default if passed options with only one option
     const calculatedPmOpts = {
@@ -196,15 +215,21 @@ export class DependencyInstaller {
       cacheRootDir: this.cacheRootDir,
       nodeLinker: this.nodeLinker,
       packageImportMethod: this.packageImportMethod,
+      minimumReleaseAge: this.minimumReleaseAge,
+      minimumReleaseAgeExclude: this.minimumReleaseAgeExclude,
       sideEffectsCache: this.sideEffectsCache,
       nodeVersion: this.nodeVersion,
       engineStrict: this.engineStrict,
       packageManagerConfigRootDir: options.packageManagerConfigRootDir,
       peerDependencyRules: this.peerDependencyRules,
       hidePackageManagerOutput,
-      neverBuiltDependencies: ['core-js', ...(this.neverBuiltDependencies ?? [])],
+      neverBuiltDependencies: this.neverBuiltDependencies,
+      allowScripts: this.allowScripts,
+      dangerouslyAllowAllScripts: this.dangerouslyAllowAllScripts,
       preferOffline: this.preferOffline,
       dedupeInjectedDeps: options.dedupeInjectedDeps,
+      dependenciesGraph: options.dependenciesGraph,
+      forcedHarmonyVersion: options.forcedHarmonyVersion,
       ...packageManagerOptions,
     };
     if (options.installTeambitBit) {
@@ -222,12 +247,17 @@ export class DependencyInstaller {
     }
 
     if (!packageManagerOptions.rootComponents && !packageManagerOptions.keepExistingModulesDir) {
-      // Remove node modules dir for all components dirs, since it might contain left overs from previous install.
-      //
-      // This is not needed when "rootComponents" are used, as in that case the package manager handles the node_modules
-      // and it never leaves node_modules in a broken state.
-      // Removing node_modules in that case would delete useful state information that is used by Yarn or pnpm.
-      await this.cleanCompsNodeModules(componentDirectoryMap);
+      try {
+        // Remove node modules dir for all components dirs, since it might contain left overs from previous install.
+        //
+        // This is not needed when "rootComponents" are used, as in that case the package manager handles the node_modules
+        // and it never leaves node_modules in a broken state.
+        // Removing node_modules in that case would delete useful state information that is used by Yarn or pnpm.
+        await this.cleanCompsNodeModules(componentDirectoryMap);
+      } catch (err) {
+        this.logger.debug('failed to remove node_modules directories from components', err);
+        // A failure to remove the node_modules directory should not cause the process to fail
+      }
     }
 
     const messagePrefix = 'running package installation';
@@ -276,11 +306,16 @@ export class DependencyInstaller {
     copyPeerToRuntimeOnComponents,
     copyPeerToRuntimeOnRoot,
     installPeersFromEnvs,
+    resolveEnvPeersFromRoot,
     resolveVersionsFromDependenciesOnly,
     referenceLocalPackages,
+    includeAllEnvPeers,
     hasRootComponents,
     excludeExtensionsDependencies,
-  }: GetComponentManifestsOptions) {
+  }: GetComponentManifestsOptions): Promise<{
+    manifests: Record<string, ProjectManifest>;
+    peerOverrides: Record<string, string>;
+  }> {
     const options: CreateFromComponentsOptions = {
       filterComponentsFromManifests: true,
       createManifestForComponentsWithoutDependencies: true,
@@ -288,6 +323,7 @@ export class DependencyInstaller {
       dependencyFilterFn,
       resolveVersionsFromDependenciesOnly,
       referenceLocalPackages,
+      includeAllEnvPeers,
       hasRootComponents,
       excludeExtensionsDependencies,
     };
@@ -314,9 +350,10 @@ export class DependencyInstaller {
       manifests[rootDir] = workspaceManifest.toJson({
         copyPeerToRuntime: copyPeerToRuntimeOnRoot,
         installPeersFromEnvs,
+        resolveEnvPeersFromRoot,
       });
     }
-    return manifests;
+    return { manifests, peerOverrides: workspaceManifest.peerOverrides };
   }
 
   private async cleanCompsNodeModules(componentDirectoryMap: ComponentMap<string>) {

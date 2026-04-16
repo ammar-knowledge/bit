@@ -1,17 +1,17 @@
 import mapSeries from 'p-map-series';
 import { Graph, Node, Edge } from '@teambit/graph.cleargraph';
 import { flatten } from 'lodash';
-import { Consumer } from '@teambit/legacy/dist/consumer';
-import { Component, ComponentID } from '@teambit/component';
-import { DependencyResolverMain } from '@teambit/dependency-resolver';
+import type { Consumer } from '@teambit/legacy.consumer';
+import type { Component, ComponentID } from '@teambit/component';
+import type { DependencyResolverMain } from '@teambit/dependency-resolver';
 import { ComponentIdList } from '@teambit/component-id';
-import { Lane } from '@teambit/legacy/dist/scope/models';
-import { ComponentNotFound, ScopeNotFound } from '@teambit/legacy/dist/scope/exceptions';
+import type { Lane } from '@teambit/objects';
+import { ComponentNotFound, ScopeNotFound } from '@teambit/legacy.scope';
 import { ComponentNotFound as ComponentNotFoundInScope } from '@teambit/scope';
 import compact from 'lodash.compact';
-import { Logger } from '@teambit/logger';
+import type { Logger } from '@teambit/logger';
 import { BitError } from '@teambit/bit-error';
-import { Workspace } from './workspace';
+import type { Workspace } from './workspace';
 
 export type ShouldLoadFunc = (id: ComponentID) => Promise<boolean>;
 
@@ -21,7 +21,7 @@ export class GraphFromFsBuilder {
   private depth = 1;
   private consumer: Consumer;
   private importedIds: string[] = [];
-  private currentLane: Lane | null;
+  private currentLane: Lane | undefined;
   constructor(
     private workspace: Workspace,
     private logger: Logger,
@@ -59,6 +59,16 @@ export class GraphFromFsBuilder {
    * we keep performance sane as the importMany doesn't run multiple time and therefore the round
    * trips to the remotes are minimal.
    *
+   * LAZY IMPORT MODE (when shouldLoadItsDeps is provided):
+   * when a filter function (shouldLoadItsDeps) is provided, we use "lazy import" mode to optimize
+   * performance. instead of importing all flattened dependencies at once, we:
+   * 1. only import dependencies that pass the filter (e.g., only aspects)
+   * 2. don't fetch their flattened dependencies upfront (includeDependencies: false)
+   * 3. let the recursive depth iteration handle importing deps as needed
+   * this is much more efficient when building filtered graphs (e.g., aspects-only graph) because
+   * we avoid fetching huge dependency trees for components we don't care about.
+   *
+   * TRADITIONAL MODE (without filter):
    * normally, one importMany of the seeders is enough as importMany knows to fetch all flattened.
    * however, since this buildGraph is performed on the workspace, a dependency may be new or
    * modified and as such, we don't know its flattened yet.
@@ -106,24 +116,41 @@ export class GraphFromFsBuilder {
   /**
    * only for components from the workspace that can be modified to add/remove dependencies, we need to make sure that
    * all their dependencies are imported.
-   * remember that `importMany` fetches all flattened dependencies. once a component from scope is imported, we know
-   * that all its flattened dependencies are there. no need to call importMany again for them.
+   *
+   * when `shouldLoadItsDeps` is provided, we use "lazy import" mode:
+   * - only import filtered dependencies (those passing the shouldLoadItsDeps check)
+   * - use preferDependencyGraph to avoid fetching flattened dependencies
+   * - the recursive depth iteration will handle importing deps as needed
+   * this is much more efficient when building a filtered graph (e.g., aspects-only graph)
+   *
+   * without a filter, we use the traditional approach:
+   * - `importMany` fetches all flattened dependencies (preferDependencyGraph: false)
+   * - once a component from scope is imported, all its flattened dependencies are there
    */
   private async importObjects(components: Component[]) {
     const workspaceIds = this.workspace.listIds();
     const compOnWorkspaceOnly = components.filter((comp) => workspaceIds.find((id) => id.isEqual(comp.id)));
-    const allDeps = (await Promise.all(compOnWorkspaceOnly.map((c) => this.getAllDepsUnfiltered(c)))).flat();
+
+    // when shouldLoadItsDeps is provided, use lazy import: only import filtered deps without their flattened
+    const useLazyImport = Boolean(this.shouldLoadItsDeps);
+    const getDepsFunc = useLazyImport
+      ? (c: Component) => this.getAllDepsFiltered(c)
+      : (c: Component) => this.getAllDepsUnfiltered(c);
+
+    const allDeps = (await Promise.all(compOnWorkspaceOnly.map(getDepsFunc))).flat();
     const allDepsNotImported = allDeps.filter((d) => !this.importedIds.includes(d.toString()));
     const exportedDeps = allDepsNotImported.map((id) => id).filter((dep) => this.workspace.isExported(dep));
     const scopeComponentsImporter = this.consumer.scope.scopeImporter;
     await scopeComponentsImporter.importMany({
       ids: ComponentIdList.uniqFromArray(exportedDeps),
-      preferDependencyGraph: false,
+      preferDependencyGraph: useLazyImport,
       throwForDependencyNotFound: this.shouldThrowOnMissingDep,
       throwForSeederNotFound: this.shouldThrowOnMissingDep,
       reFetchUnBuiltVersion: false,
-      lane: this.currentLane || undefined,
-      reason: 'for building a graph from the workspace',
+      lane: this.currentLane,
+      reason: useLazyImport
+        ? 'for building a filtered graph from the workspace (lazy)'
+        : 'for building a graph from the workspace',
     });
     allDepsNotImported.map((id) => this.importedIds.push(id.toString()));
   }

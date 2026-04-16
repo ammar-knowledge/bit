@@ -1,19 +1,22 @@
 import { join, resolve } from 'path';
+import { promisify } from 'util';
+import { rspack } from '@rspack/core';
 import fs, { existsSync, outputFileSync, readJsonSync } from 'fs-extra';
-import { AspectDefinition } from '@teambit/aspect-loader';
+import type { AspectDefinition } from '@teambit/aspect-loader';
 import {
   createHarmonyImports,
   createImports,
   getIdSetters,
   getIdentifiers,
 } from '@teambit/harmony.modules.harmony-root-generator';
-import { sha1 } from '@teambit/legacy/dist/utils';
-import { toWindowsCompatiblePath } from '@teambit/toolbox.path.to-windows-compatible-path';
-import webpack from 'webpack';
-import { promisify } from 'util';
+import { sha1 } from '@teambit/toolbox.crypto.sha1';
+import normalizePath from 'normalize-path';
 import { PreviewAspect } from './preview.aspect';
-import { createWebpackConfig } from './webpack/webpack.config';
 import { clearConsole } from './pre-bundle-utils';
+import { getPreviewDistDir } from './mk-temp-dir';
+import { createRspackConfig } from './rspack/rspack.config';
+
+const previewDistDir = getPreviewDistDir();
 
 export const RUNTIME_NAME = 'preview';
 export const PUBLIC_DIR = join('public', 'bit-preview');
@@ -105,14 +108,14 @@ export async function buildPreBundlePreview(resolvedAspects: AspectDefinition[],
     PreviewAspect.id,
     __dirname
   );
-  const config = createWebpackConfig(outputDir, mainEntry);
-  const compiler = webpack(config);
+  const config = createRspackConfig(outputDir, mainEntry);
+  const compiler = rspack(config as any);
   const compilerRun = promisify(compiler.run.bind(compiler));
   const results = await compilerRun();
   if (!results) throw new Error();
   if (results?.hasErrors()) {
     clearConsole();
-    throw new Error(results?.toString());
+    throw new Error(results?.toString({}));
   }
   return results;
 }
@@ -122,7 +125,7 @@ export async function generateBundlePreviewEntry(rootAspectId: string, previewPr
   const manifest = readJsonSync(manifestPath);
   const imports = manifest.entrypoints
     .map((entry: string) => {
-      const entryPath = toWindowsCompatiblePath(join(previewPreBundlePath, entry));
+      const entryPath = normalizePath(join(previewPreBundlePath, entry));
       return entry.endsWith('.js') || entry.endsWith('.cjs') || entry.endsWith('.mjs')
         ? `import { run } from '${entryPath}';`
         : `import '${entryPath}';`;
@@ -131,7 +134,7 @@ export async function generateBundlePreviewEntry(rootAspectId: string, previewPr
   config['teambit.harmony/bit'] = rootAspectId;
 
   const contents = [imports, `run(${JSON.stringify(config, null, 2)});`].join('\n');
-  const previewRuntime = resolve(join(__dirname, `preview.entry.${sha1(contents)}.js`));
+  const previewRuntime = resolve(join(previewDistDir, `preview.entry.${sha1(contents)}.js`));
 
   if (!existsSync(previewRuntime)) {
     outputFileSync(previewRuntime, contents);

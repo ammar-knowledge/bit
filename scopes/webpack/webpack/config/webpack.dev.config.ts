@@ -6,9 +6,9 @@ import evalSourceMapMiddleware from 'react-dev-utils/evalSourceMapMiddleware';
 import noopServiceWorkerMiddleware from 'react-dev-utils/noopServiceWorkerMiddleware';
 import redirectServedPath from 'react-dev-utils/redirectServedPathMiddleware';
 import getPublicUrlOrPath from 'react-dev-utils/getPublicUrlOrPath';
-import { PubsubMain } from '@teambit/pubsub';
-import { pathNormalizeToLinux } from '@teambit/legacy/dist/utils';
-import { WebpackConfigWithDevServer } from '../webpack.dev-server';
+import type { PubsubMain } from '@teambit/pubsub';
+import { pathNormalizeToLinux } from '@teambit/toolbox.path.path';
+import type { WebpackConfigWithDevServer } from '../webpack.dev-server';
 import { fallbacks } from './webpack-fallbacks';
 
 import { html } from './html';
@@ -46,8 +46,6 @@ export function configFactory(
     output: {
       // Development filename output
       filename: 'static/js/[name].bundle.js',
-
-      pathinfo: true,
 
       path: resolveWorkspacePath(publicDirectory),
 
@@ -87,9 +85,11 @@ export function configFactory(
           // Can be:
           // serveIndex: {} (options for the `serveIndex` option you can find https://github.com/expressjs/serve-index)
           serveIndex: true,
-          // Can be:
-          // watch: {} (options for the `watch` option you can find https://github.com/paulmillr/chokidar)
-          watch: true,
+          // Disabled: The static public directory typically doesn't exist, and when Chokidar
+          // watches a non-existent path, it recursively watches parent directories until it
+          // finds one that exists - potentially watching the entire workspace root.
+          // This causes unnecessary file system events and wastes FSEvents streams on macOS.
+          watch: false,
         },
       ],
 
@@ -160,9 +160,7 @@ export function configFactory(
       }),
     ],
 
-    snapshot: {
-      ...(componentPathsRegExps && componentPathsRegExps.length > 0 ? { managedPaths: componentPathsRegExps } : {}),
-    },
+    snapshot: componentPathsRegExps && componentPathsRegExps.length > 0 ? { managedPaths: componentPathsRegExps } : {},
 
     watchOptions: {
       poll: true,

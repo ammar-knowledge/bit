@@ -1,16 +1,21 @@
 import chalk from 'chalk';
-import { compact } from 'lodash';
-import { applyVersionReport, installationErrorOutput, compilationErrorOutput } from '@teambit/merging';
-import { Command, CommandOptions } from '@teambit/cli';
-import { MergeStrategy } from '@teambit/legacy/dist/consumer/versions-ops/merge-version';
-import { COMPONENT_PATTERN_HELP } from '@teambit/legacy/dist/constants';
-import { LanesMain } from './lanes.main.runtime';
+import type { MergeStrategy } from '@teambit/component.modules.merge-helper';
+import {
+  applyVersionReport,
+  installationErrorOutput,
+  compilationErrorOutput,
+} from '@teambit/component.modules.merge-helper';
+import type { Command, CommandOptions } from '@teambit/cli';
+import { formatItem, formatSection, formatSuccessSummary, formatDetailsHint, joinSections } from '@teambit/cli';
+import { COMPONENT_PATTERN_HELP } from '@teambit/legacy.constants';
+import type { LanesMain } from './lanes.main.runtime';
 
 export class SwitchCmd implements Command {
   name = 'switch <lane>';
   description = `switch to the specified lane`;
   extendedDescription = ``;
   private = true;
+  group = 'collaborate';
   alias = '';
   arguments = [
     {
@@ -19,17 +24,16 @@ export class SwitchCmd implements Command {
     },
   ];
   options = [
+    ['h', 'head', 'switch to the head of the lane/main (fetches the latest changes from the remote)'],
     [
-      'n',
-      'alias <string>',
-      "relevant when the specified lane is a remote lane. create a local alias for the lane (doesnt affect the lane's name on the remote",
-    ],
-    [
-      'm',
-      'merge [strategy]',
+      'r',
+      'auto-merge-resolve <merge-strategy>',
       'merge local changes with the checked out version. strategy should be "theirs", "ours" or "manual"',
     ],
-    ['a', 'get-all', 'checkout all components in a lane, including those not currently in the workspace'],
+    ['', 'force-ours', 'do not merge, preserve local files as is'],
+    ['', 'force-theirs', 'do not merge, just overwrite with incoming files'],
+    ['a', 'get-all', 'DEPRECATED. this is currently the default behavior'],
+    ['', 'workspace-only', 'checkout only the components in the workspace to the selected lane'],
     ['x', 'skip-dependency-installation', 'do not install dependencies of the imported components'],
     [
       'p',
@@ -37,7 +41,14 @@ export class SwitchCmd implements Command {
       `switch only the lane components matching the specified component-pattern. only works when the workspace is empty\n
 ${COMPONENT_PATTERN_HELP}`,
     ],
+    [
+      'n',
+      'alias <string>',
+      "relevant when the specified lane is a remote lane. create a local alias for the lane (doesnt affect the lane's name on the remote",
+    ],
+    ['', 'verbose', 'display detailed information about components that legitimately were not switched'],
     ['j', 'json', 'return the output as JSON'],
+    ['', 'branch', 'create and checkout a new git branch named after the lane'],
   ] as CommandOptions;
   loader = true;
 
@@ -46,55 +57,95 @@ ${COMPONENT_PATTERN_HELP}`,
   async report(
     [lane]: [string],
     {
+      head,
       alias,
-      merge,
+      autoMergeResolve,
+      forceOurs,
+      forceTheirs,
       getAll = false,
+      workspaceOnly = false,
       skipDependencyInstallation = false,
       pattern,
+      verbose,
       json = false,
+      branch = false,
     }: {
+      head?: boolean;
       alias?: string;
-      merge?: MergeStrategy;
+      autoMergeResolve?: MergeStrategy;
+      forceOurs?: boolean;
+      forceTheirs?: boolean;
       getAll?: boolean;
+      workspaceOnly?: boolean;
       skipDependencyInstallation?: boolean;
       override?: boolean;
       pattern?: string;
+      verbose?: boolean;
       json?: boolean;
+      branch?: boolean;
     }
   ) {
-    const { components, failedComponents, installationError, compilationError } = await this.lanes.switchLanes(lane, {
+    const switchResult = await this.lanes.switchLanes(lane, {
+      head,
       alias,
-      merge,
-      getAll,
+      merge: autoMergeResolve,
+      forceOurs,
+      forceTheirs,
+      workspaceOnly,
       pattern,
       skipDependencyInstallation,
+      branch,
     });
+    const { components, failedComponents, installationError, compilationError, gitBranchWarning } = switchResult;
+
+    if (getAll) {
+      this.lanes.logger.warn('the --get-all flag is deprecated and currently the default behavior');
+    }
     if (json) {
       return JSON.stringify({ components, failedComponents }, null, 4);
     }
-    const getFailureOutput = () => {
-      if (!failedComponents || !failedComponents.length) return '';
-      const title = 'the switch has been canceled for the following component(s)';
-      const body = failedComponents
-        .map((failedComponent) => {
-          const color = failedComponent.unchangedLegitimately ? 'white' : 'red';
-          return `${chalk.bold(failedComponent.id.toString())} - ${chalk[color](failedComponent.unchangedMessage)}`;
-        })
-        .join('\n');
-      return `${title}\n${body}`;
+    const skippedComponents = failedComponents ?? [];
+    const hasSkippedComponents = skippedComponents.length > 0 && !verbose;
+
+    const getFailureOutputMinimal = () => {
+      if (!hasSkippedComponents) return '';
+      return formatDetailsHint(`full list of ${skippedComponents.length} skipped component(s)`);
+    };
+    const getFailureOutputDetailed = () => {
+      if (!skippedComponents.length) return '';
+      const items = skippedComponents.map((failedComponent) =>
+        formatItem(`${chalk.bold(failedComponent.id.toString())} - ${failedComponent.unchangedMessage}`)
+      );
+      return formatSection('switch skipped', '', items);
     };
     const getSuccessfulOutput = () => {
-      const laneSwitched = chalk.green(`\nsuccessfully set "${chalk.bold(lane)}" as the active lane`);
-      if (!components || !components.length) return `No components have been changed.${laneSwitched}`;
-      const title = `successfully switched ${components.length} components to the head of lane ${lane}\n`;
-      return chalk.bold(title) + applyVersionReport(components, true, false) + laneSwitched;
+      const laneSwitched = formatSuccessSummary(`successfully set "${chalk.bold(lane)}" as the active lane`);
+      if (!components || !components.length) return `No components have been changed.\n${laneSwitched}`;
+      const title = `successfully switched ${components.length} components to the head of lane ${lane}`;
+      return [formatSuccessSummary(title), applyVersionReport(components, true, false), laneSwitched]
+        .filter(Boolean)
+        .join('\n');
     };
 
-    return compact([
-      getFailureOutput(),
-      getSuccessfulOutput(),
-      installationErrorOutput(installationError),
-      compilationErrorOutput(compilationError),
-    ]).join('\n\n');
+    const getGitBranchWarningOutput = () => {
+      return gitBranchWarning ? chalk.yellow(`Warning: ${gitBranchWarning}`) : '';
+    };
+
+    const buildOutput = (failureOutput: string) =>
+      joinSections([
+        failureOutput,
+        getSuccessfulOutput(),
+        getGitBranchWarningOutput(),
+        installationErrorOutput(installationError),
+        compilationErrorOutput(compilationError),
+      ]);
+
+    if (!hasSkippedComponents) {
+      return buildOutput(getFailureOutputDetailed());
+    }
+
+    const data = buildOutput(getFailureOutputMinimal());
+    const details = buildOutput(getFailureOutputDetailed());
+    return { data, code: 0, details };
   }
 }
