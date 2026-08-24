@@ -274,7 +274,7 @@
         "@teambit/gitconfig": "2.0.10",
         "@teambit/graph.cleargraph": "0.0.11",
         "@teambit/harmony": "0.4.12",
-        "@teambit/harmony.envs.core-aspect-env": "2.0.1",
+        "@teambit/harmony.envs.core-aspect-env": "2.0.7",
         "@teambit/html.modules.inject-html-element": "0.0.6",
         "@teambit/lane-id": "~0.0.312",
         "@teambit/lanes.ui.icons.lane-icon": "~0.0.9",
@@ -325,7 +325,7 @@
         "@teambit/toolbox.time.time-format": "~0.0.502",
         "@teambit/typescript.deps-detectors.detective-typescript": "~0.0.10",
         "@teambit/typescript.deps-lookups.lookup-typescript": "~0.0.2",
-        "@teambit/typescript.typescript-compiler": "^5.0.1",
+        "@teambit/typescript.typescript-compiler": "^5.0.3",
         "@teambit/ui-foundation.ui.constants.z-indexes": "~0.0.504",
         "@teambit/ui-foundation.ui.corner": "~0.0.520",
         "@teambit/ui-foundation.ui.empty-component-gallery": "~0.0.512",
@@ -559,6 +559,8 @@
         "multimatch": "5.0.0",
         "nerf-dart": "1.0.0",
         "node-fetch": "2.6.7",
+        // put on PATH by teambit.dependencies/pnpm so dependency build scripts
+        // can shell out to it; the pnpm engine ships no node-gyp of its own
         "node-gyp": "11.5.0",
         "node-source-walk": "4.2.0",
         "normalize-path": "3.0.0",
